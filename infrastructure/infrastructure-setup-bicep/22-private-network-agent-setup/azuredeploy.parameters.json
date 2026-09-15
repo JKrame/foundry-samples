@@ -53,6 +53,12 @@
     "azureCosmosDBAccountResourceId": {
       "value": ""
     },
+    "createDependentResourcePrivateEndpoints": {
+      "value": true
+    },
+    "assignProjectStorageAndCosmosAccountRoles": {
+      "value": true
+    },
     "dnsZonesSubscriptionId": {
       "value": ""
     },

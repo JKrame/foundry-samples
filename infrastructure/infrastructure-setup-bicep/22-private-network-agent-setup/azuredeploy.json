@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "13744233303770667343"
+      "templateHash": "16736530510756265113"
     }
   },
   "parameters": {
@@ -203,6 +203,20 @@
       "defaultValue": "",
       "metadata": {
         "description": "Optional developer IP CIDR to allowlist for ACR push access (e.g., 203.0.113.0/26 or 10.0.0.0/16). When empty, public access remains disabled."
+      }
+    },
+    "createDependentResourcePrivateEndpoints": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Create private endpoints and DNS zone groups for AI Search, Storage, and Cosmos DB. Set false only when the supplied existing resources already have private endpoints reachable from this VNet. The Foundry account private endpoint is always created."
+      }
+    },
+    "assignProjectStorageAndCosmosAccountRoles": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Assign Cosmos DB Operator and Storage Blob Data Contributor to the Project managed identity. Set false when capabilitySettings provisioning is authorized by the ARM caller; grant these roles to the Project identity after provisioning and before data-plane use."
       }
     },
     "aiSearchResourceId": {
@@ -1688,6 +1702,9 @@
           },
           "dnsZonesSubscriptionId": {
             "value": "[variables('resolvedDnsZonesSubscriptionId')]"
+          },
+          "createDependentResourcePrivateEndpoints": {
+            "value": "[parameters('createDependentResourcePrivateEndpoints')]"
           }
         },
         "template": {
@@ -1697,7 +1714,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "10335455138305116973"
+              "templateHash": "5319829314623288481"
             }
           },
           "parameters": {
@@ -1818,6 +1835,13 @@
               "metadata": {
                 "description": "Subscription ID where existing private DNS zones are located. Should be resolved to current subscription if empty."
               }
+            },
+            "createDependentResourcePrivateEndpoints": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Create private endpoints and DNS zone groups for AI Search, Storage, and Cosmos DB. Set false when existing endpoints already provide connectivity from the VNet. The Foundry account private endpoint is always created."
+              }
             }
           },
           "variables": {
@@ -1864,6 +1888,7 @@
               }
             },
             {
+              "condition": "[parameters('createDependentResourcePrivateEndpoints')]",
               "type": "Microsoft.Network/privateEndpoints",
               "apiVersion": "2024-05-01",
               "name": "[format('{0}-private-endpoint', parameters('aiSearchName'))]",
@@ -1886,6 +1911,7 @@
               }
             },
             {
+              "condition": "[parameters('createDependentResourcePrivateEndpoints')]",
               "type": "Microsoft.Network/privateEndpoints",
               "apiVersion": "2024-05-01",
               "name": "[format('{0}-private-endpoint', parameters('storageName'))]",
@@ -1908,6 +1934,7 @@
               }
             },
             {
+              "condition": "[parameters('createDependentResourcePrivateEndpoints')]",
               "type": "Microsoft.Network/privateEndpoints",
               "apiVersion": "2024-05-01",
               "name": "[format('{0}-private-endpoint', parameters('cosmosDBName'))]",
@@ -2104,6 +2131,7 @@
               ]
             },
             {
+              "condition": "[parameters('createDependentResourcePrivateEndpoints')]",
               "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
               "apiVersion": "2024-05-01",
               "name": "[format('{0}/{1}', format('{0}-private-endpoint', parameters('aiSearchName')), format('{0}-dns-group', parameters('aiSearchName')))]",
@@ -2124,6 +2152,7 @@
               ]
             },
             {
+              "condition": "[parameters('createDependentResourcePrivateEndpoints')]",
               "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
               "apiVersion": "2024-05-01",
               "name": "[format('{0}/{1}', format('{0}-private-endpoint', parameters('storageName')), format('{0}-dns-group', parameters('storageName')))]",
@@ -2144,6 +2173,7 @@
               ]
             },
             {
+              "condition": "[parameters('createDependentResourcePrivateEndpoints')]",
               "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
               "apiVersion": "2024-05-01",
               "name": "[format('{0}/{1}', format('{0}-private-endpoint', parameters('cosmosDBName')), format('{0}-dns-group', parameters('cosmosDBName')))]",
@@ -3041,6 +3071,7 @@
       ]
     },
     {
+      "condition": "[parameters('assignProjectStorageAndCosmosAccountRoles')]",
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
       "name": "[format('storage-{0}-{1}-deployment', variables('azureStorageName'), variables('uniqueSuffix'))]",
@@ -3099,6 +3130,7 @@
       ]
     },
     {
+      "condition": "[parameters('assignProjectStorageAndCosmosAccountRoles')]",
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
       "name": "[format('cosmos-account-ra-{0}-deployment', variables('uniqueSuffix'))]",

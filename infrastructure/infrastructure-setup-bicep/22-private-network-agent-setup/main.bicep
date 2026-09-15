@@ -121,6 +121,12 @@ param enableContainerRegistry bool = true
 @description('Optional developer IP CIDR to allowlist for ACR push access (e.g., 203.0.113.0/26 or 10.0.0.0/16). When empty, public access remains disabled.')
 param developerIpCidr string = ''
 
+@description('Create private endpoints and DNS zone groups for AI Search, Storage, and Cosmos DB. Set false only when the supplied existing resources already have private endpoints reachable from this VNet. The Foundry account private endpoint is always created.')
+param createDependentResourcePrivateEndpoints bool = true
+
+@description('Assign Cosmos DB Operator and Storage Blob Data Contributor to the Project managed identity. Set false when capabilitySettings provisioning is authorized by the ARM caller; grant these roles to the Project identity after provisioning and before data-plane use.')
+param assignProjectStorageAndCosmosAccountRoles bool = true
+
 // Scenario 22: the account-level capability host is ALWAYS implicit. For a fresh
 // account it is auto-created by the platform via `networkInjections.scenario='agent'`
 // (see ai-account-identity.bicep). This template intentionally has no opt-in
@@ -365,6 +371,7 @@ module privateEndpointAndDNS 'modules-network-secured/private-endpoint-and-dns.b
       storageAccountSubscriptionId: azureStorageSubscriptionId // Subscription ID for Storage Account
       existingDnsZones: existingDnsZones
       dnsZonesSubscriptionId: resolvedDnsZonesSubscriptionId
+      createDependentResourcePrivateEndpoints: createDependentResourcePrivateEndpoints
     }
     dependsOn: [
     aiSearch      // Ensure AI Search exists
@@ -469,7 +476,7 @@ module formatProjectWorkspaceId 'modules-network-secured/format-project-workspac
 /*
   Assigns the project SMI the storage blob data contributor role on the storage account
 */
-module storageAccountRoleAssignment 'modules-network-secured/azure-storage-account-role-assignment.bicep' = {
+module storageAccountRoleAssignment 'modules-network-secured/azure-storage-account-role-assignment.bicep' = if (assignProjectStorageAndCosmosAccountRoles) {
   name: 'storage-${azureStorageName}-${uniqueSuffix}-deployment'
   scope: resourceGroup(azureStorageSubscriptionId, azureStorageResourceGroupName)
   params: {
@@ -483,7 +490,7 @@ module storageAccountRoleAssignment 'modules-network-secured/azure-storage-accou
 }
 
 // The Comos DB Operator role must be assigned before the caphost is created
-module cosmosAccountRoleAssignments 'modules-network-secured/cosmosdb-account-role-assignment.bicep' = {
+module cosmosAccountRoleAssignments 'modules-network-secured/cosmosdb-account-role-assignment.bicep' = if (assignProjectStorageAndCosmosAccountRoles) {
   name: 'cosmos-account-ra-${uniqueSuffix}-deployment'
   scope: resourceGroup(cosmosDBSubscriptionId, cosmosDBResourceGroupName)
   params: {
@@ -513,9 +520,10 @@ module aiSearchRoleAssignments 'modules-network-secured/ai-search-role-assignmen
 // Scenario 22: no explicit account or project capability-host modules. The
 // account caphost is created implicitly via networkInjections on the account,
 // and the project caphost is created implicitly by AccountRP from the project's
-// capabilitySettings (ai-project-identity.bicep). The account/project SMI roles
-// the implicit caphost needs (Cosmos DB Operator, Storage Blob Data Contributor,
-// AI Search Index/Service Contributor) are assigned above, before the caphost runs.
+// capabilitySettings (ai-project-identity.bicep). AI Search roles are assigned
+// above. Storage/Cosmos account roles are assigned when
+// assignProjectStorageAndCosmosAccountRoles is true; caller-authorized flows can
+// defer those Project MI grants until after provisioning.
 
 // Container-scoped data-plane roles. The implicit capability host provisions the
 // agent containers (and their role assignments) during its create. These modules

@@ -75,6 +75,9 @@ param existingDnsZones object = {
 @description('Subscription ID where existing private DNS zones are located. Should be resolved to current subscription if empty.')
 param dnsZonesSubscriptionId string
 
+@description('Create private endpoints and DNS zone groups for AI Search, Storage, and Cosmos DB. Set false when existing endpoints already provide connectivity from the VNet. The Foundry account private endpoint is always created.')
+param createDependentResourcePrivateEndpoints bool = true
+
 // ---- Resource references ----
 resource aiAccount 'Microsoft.CognitiveServices/accounts@2023-05-01' existing = {
   name: aiAccountName
@@ -133,7 +136,7 @@ resource aiAccountPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01
 // Private endpoint for AI Search
 // - Creates network interface in customer hub subnet
 // - Establishes private connection to AI Search service
-resource aiSearchPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+resource aiSearchPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = if (createDependentResourcePrivateEndpoints) {
   name: '${aiSearchName}-private-endpoint'
   location: resourceGroup().location
   properties: {
@@ -155,7 +158,7 @@ resource aiSearchPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01'
 // Private endpoint for Storage Account
 // - Creates network interface in customer hub subnet
 // - Establishes private connection to blob storage
-resource storagePrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+resource storagePrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = if (createDependentResourcePrivateEndpoints) {
   name: '${storageName}-private-endpoint'
   location: resourceGroup().location
   properties: {
@@ -174,7 +177,7 @@ resource storagePrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' 
 
 /*--------------------------------------------- Cosmos DB Private Endpoint -------------------------------------*/
 
-resource cosmosDBPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+resource cosmosDBPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = if (createDependentResourcePrivateEndpoints) {
   name: '${cosmosDBName}-private-endpoint'
   location: resourceGroup().location
   properties: {
@@ -367,7 +370,7 @@ resource aiServicesDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGr
     empty(cognitiveServicesDnsZoneRG) ? cognitiveServicesLink : null
   ]
 }
-resource aiSearchDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+resource aiSearchDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = if (createDependentResourcePrivateEndpoints) {
   parent: aiSearchPrivateEndpoint
   name: '${aiSearchName}-dns-group'
   properties: {
@@ -379,7 +382,7 @@ resource aiSearchDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGrou
     empty(aiSearchDnsZoneRG) ? aiSearchLink : null
   ]
 }
-resource storageDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+resource storageDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = if (createDependentResourcePrivateEndpoints) {
   parent: storagePrivateEndpoint
   name: '${storageName}-dns-group'
   properties: {
@@ -391,7 +394,7 @@ resource storageDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroup
     empty(storageDnsZoneRG) ? storageLink : null
   ]
 }
-resource cosmosDBDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+resource cosmosDBDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = if (createDependentResourcePrivateEndpoints) {
   parent: cosmosDBPrivateEndpoint
   name: '${cosmosDBName}-dns-group'
   properties: {

@@ -21,6 +21,14 @@ param aiSearchResourceId = ''
 param azureStorageAccountResourceId = ''
 param azureCosmosDBAccountResourceId = ''
 
+// Keep true for a self-contained deployment. Set false only when all three
+// existing resources above already have private endpoints reachable from this VNet.
+param createDependentResourcePrivateEndpoints = true
+
+// Keep true for standalone use. Caller-authorized provisioning flows can set
+// false, then grant both roles to the Project identity before data-plane use.
+param assignProjectStorageAndCosmosAccountRoles = true
+
 // Subscription ID where DNS zones are located (leave empty to use deployment subscription)
 // ⚠️ If set to a different subscription, ALL zones below MUST have resource groups specified
 param dnsZonesSubscriptionId = ''

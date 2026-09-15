@@ -198,7 +198,11 @@ Note: If not provided, the following resources will be created automatically for
 | `dnsZonesSubscriptionId` | Subscription ID for existing DNS zones. Accepts either a bare GUID (`<subscription-id>`) or a full ARM subscription path (`/subscriptions/<subscription-id>`); the template normalizes the value internally. | `''` (current sub) | No |
 | `existingDnsZones` | Map of DNS zone names to resource groups | All empty (creates new) | No |
 | `enableContainerRegistry` | When `true`, creates an Azure Container Registry (Premium SKU) with a private endpoint in the PE subnet, a `privatelink.azurecr.io` DNS zone, and an AcrPull role assignment for the project managed identity. | `true` | No |
+| `createDependentResourcePrivateEndpoints` | When `true`, creates private endpoints and DNS zone groups for AI Search, Storage, and Cosmos DB. Set `false` only when the supplied existing resources already have private endpoints reachable from the selected VNet. The new Foundry account private endpoint is always created. | `true` | No |
+| `assignProjectStorageAndCosmosAccountRoles` | Assigns Cosmos DB Operator and Storage Blob Data Contributor to the Project managed identity. Set `false` for caller-authorized `capabilitySettings` provisioning, then grant both roles to the Project identity before data-plane operations. | `true` | No |
 | `developerIpCidr` | Developer IP CIDR to allowlist for ACR push access (e.g., `203.0.113.0/26`). When set, enables public network access with a deny-all default + an IP allowlist rule so developers can push images. When empty, public access remains fully disabled. | `''` | No |
+
+When `assignProjectStorageAndCosmosAccountRoles=false`, grant **Cosmos DB Operator** on the supplied Cosmos DB account and **Storage Blob Data Contributor** on the supplied Storage account to the ARM deployment caller before creating the project. The Project managed identity should not hold those two account-level roles during `capabilitySettings` provisioning. Grant them to the Project managed identity only after provisioning succeeds and before the project performs data-plane operations.
 
 #### BYO Resource Details
 
@@ -220,6 +224,10 @@ To use an existing VNet and subnets, set the existingVnetResourceId parameter to
 💡 If subnets information is provided then make sure it exist within the specified VNet to avoid deployment errors. If subnet information is not provided, the template will create subnets with the default address space.
 
 💡 **Reuse pre-configured subnets**: If your subnets are already configured by your platform team (NSG, route tables, `privateEndpointNetworkPolicies` set per tenant policy), set `reuseExistingSubnets = true`. This tells the template to reference the subnets without re-applying their configuration, which prevents an inadvertent reset of subnet properties on redeploy.
+
+⚠️ **One Foundry account per agent subnet**: You may reuse a VNet across Foundry accounts, but each network-injected account requires its own subnet delegated exclusively to `Microsoft.App/environments`. When creating a new account in an existing VNet, create a new delegated subnet and pass its name as `agentSubnetName`. The private endpoint subnet can be reused.
+
+💡 **Reuse existing dependent resources and networking**: Supply `aiSearchResourceId`, `azureStorageAccountResourceId`, and `azureCosmosDBAccountResourceId`, point `existingVnetResourceId` at the shared VNet, set `reuseExistingSubnets = true`, and provide the existing private DNS zones. If those resources already have private endpoints reachable from the VNet, set `createDependentResourcePrivateEndpoints = false` to preserve them. The template still creates a private endpoint and DNS zone group for the new Foundry account.
 
 💡 **Cross-Subscription DNS Zones**: All DNS zones specified in `existingDnsZones` will be referenced from the subscription specified in `dnsZonesSubscriptionId`. Leave this parameter empty (default) to use the current deployment subscription, or set it to a subscription ID if your DNS zones are located in a different subscription. The parameter accepts either a bare subscription GUID or a full ARM subscription path (`/subscriptions/<subscription-id>`); the template normalizes the value internally.
 
