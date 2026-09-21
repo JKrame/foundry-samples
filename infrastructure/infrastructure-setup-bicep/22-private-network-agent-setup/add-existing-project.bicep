@@ -1,10 +1,8 @@
-// Day-2 scenario: wire and secure the network-secured Standard Agent setup onto an
-// EXISTING AI Foundry project, reusing it in place. Unlike add-project.bicep this
-// does NOT create a new project and does NOT append a random suffix: the supplied
-// projectName must be an existing project under the supplied account. It layers the
-// three agent connections, role assignments, and the project capability host onto
-// that project, reusing every shared module. See the README section
-// "Securing an Existing Project (Reuse In-Place)".
+// Day-2 path: PUT the named existing Project with capabilitySettings, then declare
+// explicit child connections and enabled Project MI role assignments. No suffix is
+// appended and no explicit CapabilityHost resource is declared. Verify the Project
+// exists and the parent is already network injected; this is not a read-only reference.
+// See README "Update an existing project in place" for metadata and RBAC caveats.
 
 @description('Name of the existing AI Services (Foundry) account')
 param existingAccountName string
@@ -24,22 +22,22 @@ param location string
 @description('Display name to preserve on the existing project (pass the current value so the upsert does not change it).')
 param displayName string
 
-@description('Description to preserve on the existing project (pass the current value so the upsert does not change it).')
+@description('Description written by the Project PUT. Pass the current value to preserve it; omitting this parameter uses an empty string and clears an existing description.')
 param projectDescription string = ''
 
-// Scenario 22: the project capability host is implicit (created by AccountRP from
-// the project's capabilitySettings). There is no projectCapHost name parameter.
+// The parent account must already be network injected. capabilitySettings selects
+// BYO stores, not permissions. There is no projectCapHost name parameter.
 
 @description('Set false to skip all role-assignment modules. Use this when the existing project identity is ALREADY permissioned on the backing services (a pre-permissioned production project), to avoid RoleAssignmentExists on assignments that were created under different names.')
 param assignRoles bool = true
 
-@description('Optional. Full name of the Cosmos DB connection on the project. Leave empty to use the default <cosmosName>-<project>. Set this to match a connection that already exists (for example one a portal-created capability host already binds to).')
+@description('Optional name for an explicit Cosmos DB connection PUT. Empty uses <cosmosName>-<project>. This does not override implicit host bindings; inspect existing managed connections before updating.')
 param cosmosDBConnectionName string = ''
 
-@description('Optional. Full name of the Storage connection on the project. Leave empty to use the default <storageName>-<project>.')
+@description('Optional name for an explicit Storage connection PUT. Empty uses <storageName>-<project>. This does not override implicit host bindings; inspect existing managed connections before updating.')
 param azureStorageConnectionName string = ''
 
-@description('Optional. Full name of the AI Search connection on the project. Leave empty to use the default <searchName>-<project>.')
+@description('Optional name for an explicit AI Search connection PUT. Empty uses <searchName>-<project>. This does not override implicit host bindings; inspect existing managed connections before updating.')
 param aiSearchConnectionName string = ''
 
 // Existing shared resources (from your original deployment)
@@ -75,9 +73,8 @@ param cosmosDBSubscriptionId string
 var projectNameLower = toLower(projectName)
 var connectionSuffix = '-${projectNameLower}'
 
-// Effective connection names: explicit override if supplied, otherwise the
-// deterministic default. Lets a customer match connections a pre-existing
-// capability host already binds to.
+// Explicit connection PUT names, not a binding override for the implicit host.
+// Validate current managed connections and returned host bindings independently.
 var cosmosDBConnectionNameEffective = empty(cosmosDBConnectionName) ? '${existingCosmosDBName}${connectionSuffix}' : cosmosDBConnectionName
 var azureStorageConnectionNameEffective = empty(azureStorageConnectionName) ? '${existingStorageName}${connectionSuffix}' : azureStorageConnectionName
 var aiSearchConnectionNameEffective = empty(aiSearchConnectionName) ? '${existingAiSearchName}${connectionSuffix}' : aiSearchConnectionName
@@ -116,7 +113,7 @@ module validateSearchAadAuth 'modules-network-secured/validate-search-aad-auth.b
   }
 }
 
-// Add the agent connections to the EXISTING project (no project is created)
+// PUT the named Project and its child connections; current metadata must be supplied.
 module aiProject 'modules-network-secured/ai-existing-project-connections.bicep' = {
   name: 'ai-existing-${projectNameLower}-deployment'
   params: {
@@ -184,12 +181,11 @@ module aiSearchRoleAssignments 'modules-network-secured/ai-search-role-assignmen
   }
 }
 
-// Scenario 22: no explicit project capability-host module. AccountRP creates it
-// implicitly from the project's capabilitySettings (set in the connections module).
+// No explicit project host module. Implicit provisioning requires the existing
+// network-injected parent; it does not create role assignments.
 
-// Assign storage container roles. The implicit capability host provisions the
-// agent containers and their role assignments during create; these run only when
-// assignRoles=true (e.g. to pre-assign against already-existing containers).
+// Explicit Storage account-scoped role with ABAC. assignRoles controls ALL role
+// modules (default true); it is not the assignContainerRoles switch in other paths.
 module storageContainersRoleAssignment 'modules-network-secured/blob-storage-container-role-assignments-unique.bicep' = if (assignRoles) {
   name: 'storage-containers-ra-${projectNameLower}-deployment'
   scope: resourceGroup(storageSubscriptionId, storageResourceGroupName)
@@ -204,7 +200,7 @@ module storageContainersRoleAssignment 'modules-network-secured/blob-storage-con
   ]
 }
 
-// Assign Cosmos container roles after capability host creation
+// Explicit Cosmos SQL database grant. No explicit host dependency/readiness barrier.
 module cosmosContainerRoleAssignments 'modules-network-secured/cosmos-container-role-assignments.bicep' = if (assignRoles) {
   name: 'cosmos-containers-ra-${projectNameLower}-deployment'
   scope: resourceGroup(cosmosDBSubscriptionId, cosmosDBResourceGroupName)

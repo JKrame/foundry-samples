@@ -19,9 +19,9 @@ param projectDescription string = 'Additional AI Foundry project with network se
 @description('Display name for the new project')
 param displayName string
 
-// Scenario 22: the project capability host is implicit (created by AccountRP from the
-// project's capabilitySettings in ai-project-identity-unique.bicep). No projectCapHost name.
-@description('Assign container-scoped data-plane roles (Storage Blob Data Owner / Cosmos Built-in Data Contributor on the agent containers). Off by default: the implicit capability host provisions these during create. Set true only to pre-assign against existing containers.')
+// The existing account must already be network injected. Project capabilitySettings
+// selects BYO stores for implicit provisioning; it does not grant any permissions.
+@description('Deploy explicit Project MI Storage Blob Data Owner (storage-account scope with ABAC) and Cosmos DB Built-in Data Contributor (enterprise_memory database scope) grants. Default false skips these modules; supply missing runtime grants separately. The service does not create RBAC assignments.')
 param assignContainerRoles bool = false
 
 // Existing shared resources (from your original deployment)
@@ -79,7 +79,8 @@ resource cosmosDB 'Microsoft.DocumentDB/databaseAccounts@2024-11-15' existing = 
   scope: resourceGroup(cosmosDBSubscriptionId, cosmosDBResourceGroupName)
 }
 
-// Create the new project using the unique connection module
+// Create the new project with capabilitySettings. This module declares no backing-
+// store connections; uniqueConnectionSuffix does not control service-created names.
 module aiProject 'modules-network-secured/ai-project-identity-unique.bicep' = {
   name: 'ai-${finalProjectName}-${uniqueSuffix}-deployment'
   params: {
@@ -102,7 +103,7 @@ module aiProject 'modules-network-secured/ai-project-identity-unique.bicep' = {
 
     accountName: existingAccountName
 
-    // Pass unique suffix for connection names
+    // Compatibility parameter; currently unused by resource declarations.
     uniqueConnectionSuffix: '-${finalProjectName}'
   }
 }
@@ -144,14 +145,13 @@ module aiSearchRoleAssignments 'modules-network-secured/ai-search-role-assignmen
   }
 }
 
-// Scenario 22: no explicit project capability-host module. AccountRP creates it
-// implicitly from the project's capabilitySettings. The SMI roles it needs
-// (Cosmos DB Operator, Storage Blob Data Contributor, AI Search roles) are
-// assigned above before the implicit caphost runs.
+// No explicit project host module. The parent account's network injection is a
+// prerequisite. Role modules depend on the Project MI output, not a host resource,
+// so they do not supply caller access before the Project PUT or a host-ready barrier.
 
-// Container-scoped data-plane roles. The implicit capability host provisions the
-// agent containers and their role assignments during create, so these are OFF by
-// default; enable only to pre-assign against existing containers.
+// Optional explicit runtime grants: Storage account/ABAC and Cosmos database scope.
+// The service provisions no RBAC. With these modules disabled, an authorized
+// operator must supply any missing grants before data-plane use.
 module storageContainersRoleAssignment 'modules-network-secured/blob-storage-container-role-assignments-unique.bicep' = if (assignContainerRoles) {
   name: 'storage-containers-${uniqueSuffix}-deployment'
   scope: resourceGroup(storageSubscriptionId, storageResourceGroupName)

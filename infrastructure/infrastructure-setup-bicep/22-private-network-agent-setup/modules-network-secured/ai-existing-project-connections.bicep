@@ -1,9 +1,7 @@
-// Adds the three Standard Agent connections (Cosmos DB, Storage, AI Search) onto
-// an EXISTING AI Foundry project, in place. This mirrors
-// ai-project-identity-unique.bicep but references the project with the `existing`
-// keyword so the project itself is reused (no new project, no random suffix).
-// Outputs are identical to ai-project-identity-unique.bicep so every downstream
-// module (role assignments, capability host, container roles) stays unchanged.
+// PUT the named Project with capabilitySettings and three explicit child
+// connections. Unlike an `existing` reference, this writes project metadata and
+// identity. Supply the current values when preserving them, and verify the parent
+// account is already network injected. No explicit host or RBAC resource is in this module.
 
 param accountName string
 param projectName string
@@ -14,7 +12,7 @@ param location string
 @description('Display name to preserve on the existing project (pass the current value to avoid changing it).')
 param displayName string
 
-@description('Description to preserve on the existing project (pass the current value to avoid changing it).')
+@description('Description written to the Project. Pass the current value to preserve it; the empty default clears an existing description.')
 param projectDescription string = ''
 
 param aiSearchName string
@@ -29,13 +27,13 @@ param azureStorageName string
 param azureStorageSubscriptionId string
 param azureStorageResourceGroupName string
 
-@description('Full name of the Cosmos DB connection to create or update on the project. The capability host binds to this exact name.')
+@description('Name of the explicit Cosmos DB connection to create or update. This does not select the implicit host binding; verify existing managed connections and returned bindings.')
 param cosmosDBConnectionName string
 
-@description('Full name of the Storage connection to create or update on the project. The capability host binds to this exact name.')
+@description('Name of the explicit Storage connection to create or update. This does not select the implicit host binding; verify existing managed connections and returned bindings.')
 param azureStorageConnectionName string
 
-@description('Full name of the AI Search connection to create or update on the project. The capability host binds to this exact name.')
+@description('Name of the explicit AI Search connection to create or update. This does not select the implicit host binding; verify existing managed connections and returned bindings.')
 param aiSearchConnectionName string
 
 resource searchService 'Microsoft.Search/searchServices@2024-06-01-preview' existing = {
@@ -56,10 +54,9 @@ resource account 'Microsoft.CognitiveServices/accounts@2026-05-15-preview' exist
   scope: resourceGroup()
 }
 
-// Scenario 22: upsert the existing project to apply capabilitySettings (the BYO
-// store resource IDs). This makes AccountRP create the project capability host
-// implicitly. displayName/description are passed through so the upsert preserves
-// the project's current values. The three agent connections are children.
+// A network-injected parent is required for implicit provisioning. This Project
+// PUT selects stores and writes the supplied metadata; omitted description is not
+// automatically preserved. RBAC is created by other enabled modules or an operator.
 resource project 'Microsoft.CognitiveServices/accounts/projects@2026-05-15-preview' = {
   parent: account
   name: projectName
@@ -78,8 +75,8 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2026-05-15-previ
     }
   }
 
-  // Child connections are a create/update on the project, with the same
-  // names the capability host binds to.
+  // Explicit connection PUTs. Do not assume an implicit host adopts these names
+  // or that service-managed connections can be overwritten.
   resource project_connection_cosmosdb_account 'connections@2026-05-15-preview' = {
     name: cosmosDBConnectionName
     properties: {
@@ -130,7 +127,7 @@ output projectPrincipalId string = project.identity.principalId
 #disable-next-line BCP053
 output projectWorkspaceId string = project.properties.internalId
 
-// Return the connection names so the capability host binds to the exact strings.
+// Return explicitly requested connection names; not a read of implicit host bindings.
 output cosmosDBConnection string = cosmosDBConnectionName
 output azureStorageConnection string = azureStorageConnectionName
 output aiSearchConnection string = aiSearchConnectionName

@@ -1,9 +1,10 @@
-// Assigns the necessary roles to the AI project
+// Explicit Cosmos SQL data-plane grant to the Project MI at database scope.
+// This module creates a role assignment, not a database or its containers.
 
-@description('Name of the AI Search resource')
+@description('Name of the Cosmos DB account')
 param cosmosAccountName string
 
-@description('Project name')
+@description('Principal ID of the Project managed identity')
 param projectPrincipalId string
 
 param projectWorkspaceId string

@@ -108,11 +108,11 @@ param reuseExistingSubnets bool = false
 
 // True BYO Foundry account.
 // When set, the template references the existing AI Foundry account instead of
-// creating a new one with a deterministic suffix (which orphans on re-runs).
-@description('Optional. Full ARM resource ID of an existing AI Foundry (CognitiveServices/accounts kind=AIServices) account to reuse. When set, the template will NOT create a new account.')
+// writing the RG-derived account name. It does not update existing account networking.
+@description('Optional existing Foundry AIServices account ID. Reference-only: does not configure network injection, repair the account capability host, or deploy a model. Verify the existing account is already network injected and ready; deploy the project in the account resource group/subscription.')
 param existingAiFoundryAccountResourceId string = ''
 
-@description('Optional. When true, skip the model deployment. Recommended when reusing an existing account that already has the required model deployments.')
+@description('Skip model deployment for a new account when true. The existing-account branch never creates a model, regardless of this flag; required model deployments must already exist there.')
 param skipModelDeployment bool = false
 
 @description('Enable Azure Container Registry with Private Endpoint. When true, creates an ACR (Premium SKU) with a PE in the private endpoints subnet.')
@@ -230,11 +230,11 @@ var normalizedDnsZonesSubscriptionId = empty(dnsZonesSubscriptionId)
       : dnsZonesSubscriptionId)
 var resolvedDnsZonesSubscriptionId = empty(normalizedDnsZonesSubscriptionId) ? subscription().subscriptionId : normalizedDnsZonesSubscriptionId
 
-// Scenario 22: the project capability host is implicit. It is created by
-// AccountRP from the project's `capabilitySettings` (set in ai-project-identity.bicep),
-// so there is no `projectCapHost` name parameter and no explicit caphost module.
+// Scenario 22: the network-injected parent enables implicit host provisioning;
+// the project's capabilitySettings selects its BYO stores. No projectCapHost name
+// or explicit host module is declared. The service does not create RBAC assignments.
 
-@description('Assign the container-scoped data-plane roles (Storage Blob Data Owner on the agent blob containers, Cosmos Built-in Data Contributor on the thread containers). Leave false: the implicit capability host provisions these containers and their role assignments during create. Set true only if you must pre-assign them and the containers already exist.')
+@description('Deploy explicit Project MI data-plane grants: Storage Blob Data Owner at storage-account scope with the module ABAC condition, and Cosmos DB Built-in Data Contributor on the enterprise_memory database. Default false skips these modules; an authorized operator must supply any missing runtime grants. The service does not create RBAC assignments.')
 param assignContainerRoles bool = false
 
 // Create Virtual Network and Subnets
@@ -399,7 +399,7 @@ module acr 'modules-network-secured/container-registry.bicep' = if (enableContai
   ]
 }
 
-// Application Insights for hosted-agent tracing (this template ships none). Creates a
+// Optional Application Insights for agent tracing. Creates a
 // workspace-based Application Insights and connects it to the account so the agent exports traces.
 module applicationInsights 'modules-network-secured/application-insights.bicep' = if (enableTracing) {
   name: 'app-insights-${uniqueSuffix}-deployment'
@@ -489,7 +489,8 @@ module storageAccountRoleAssignment 'modules-network-secured/azure-storage-accou
   ]
 }
 
-// The Comos DB Operator role must be assigned before the caphost is created
+// Explicit Project MI grant. This module depends on the Project output and cannot
+// authorize its earlier implicit provisioning; arrange caller permissions first.
 module cosmosAccountRoleAssignments 'modules-network-secured/cosmosdb-account-role-assignment.bicep' = if (assignProjectStorageAndCosmosAccountRoles) {
   name: 'cosmos-account-ra-${uniqueSuffix}-deployment'
   scope: resourceGroup(cosmosDBSubscriptionId, cosmosDBResourceGroupName)
@@ -503,7 +504,7 @@ module cosmosAccountRoleAssignments 'modules-network-secured/cosmosdb-account-ro
   ]
 }
 
-// This role can be assigned before or after the caphost is created
+// Explicit Project MI runtime grants; independent host readiness must be checked.
 module aiSearchRoleAssignments 'modules-network-secured/ai-search-role-assignments.bicep' = {
   name: 'ai-search-ra-${uniqueSuffix}-deployment'
   scope: resourceGroup(aiSearchServiceSubscriptionId, aiSearchServiceResourceGroupName)
@@ -517,17 +518,15 @@ module aiSearchRoleAssignments 'modules-network-secured/ai-search-role-assignmen
   ]
 }
 
-// Scenario 22: no explicit account or project capability-host modules. The
-// account caphost is created implicitly via networkInjections on the account,
-// and the project caphost is created implicitly by AccountRP from the project's
-// capabilitySettings (ai-project-identity.bicep). AI Search roles are assigned
-// above. Storage/Cosmos account roles are assigned when
-// assignProjectStorageAndCosmosAccountRoles is true; caller-authorized flows can
-// defer those Project MI grants until after provisioning.
+// Scenario 22: network injection enables implicit account/project hosts, with
+// project capabilitySettings supplying store IDs. The service creates no RBAC.
+// These Bicep modules assign Project MI roles under the deployment identity.
+// Caller provisioning permissions must already exist; disabled modules leave
+// their runtime grants to an authorized operator. File order is not a host barrier.
 
-// Container-scoped data-plane roles. The implicit capability host provisions the
-// agent containers (and their role assignments) during its create. These modules
-// are therefore OFF by default; enable only when pre-assigning to existing containers.
+// Optional explicit data-plane roles, disabled by default. Storage uses account
+// scope with an ABAC condition; Cosmos uses database scope. Container creation by
+// an implicit host does not grant data access. Review existing grants before enabling.
 module storageContainersRoleAssignment 'modules-network-secured/blob-storage-container-role-assignments.bicep' = if (assignContainerRoles) {
   name: 'storage-containers-ra-${uniqueSuffix}-deployment'
   scope: resourceGroup(azureStorageSubscriptionId, azureStorageResourceGroupName)

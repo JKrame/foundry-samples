@@ -16,7 +16,7 @@ param azureStorageName string
 param azureStorageSubscriptionId string
 param azureStorageResourceGroupName string
 
-// Add unique connection name parameter
+// Compatibility parameter; no explicit connection resource currently consumes it.
 param uniqueConnectionSuffix string = ''
 
 resource searchService 'Microsoft.Search/searchServices@2024-06-01-preview' existing = {
@@ -47,9 +47,9 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2026-05-15-previ
   properties: {
     description: projectDescription
     displayName: displayName
-    // Scenario 22: capabilitySettings (BYO store resource IDs) makes AccountRP
-    // create the project's capability host implicitly. No explicit
-    // capabilityHosts resource is declared.
+    // The parent account must already be network injected for implicit hosts.
+    // capabilitySettings selects the BYO stores; the service creates no RBAC.
+    // No explicit host or backing-store connection resources are declared here.
     #disable-next-line BCP037
     capabilitySettings: {
       documentStore: cosmosDBAccount.id
@@ -58,7 +58,7 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2026-05-15-previ
     }
   }
 
-  // Use unique connection names by appending the suffix
+  // Discover service-created connection names from the returned Project/host.
 }
 
 output projectName string = project.name
@@ -68,4 +68,4 @@ output projectPrincipalId string = project.identity.principalId
 #disable-next-line BCP053
 output projectWorkspaceId string = project.properties.internalId
 
-// Return the unique connection names
+// This module does not return or choose service-created connection names.

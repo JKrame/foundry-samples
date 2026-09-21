@@ -7,6 +7,13 @@ param projectName = 'secondproject'
 param projectDescription = 'Second AI Foundry project with network secured deployed Agent'
 param displayName = 'Second Project'
 
+// The existing account must already be network injected and ready. This entry
+// point does not update account networking. Its Project MI account/Search roles
+// are explicit Bicep assignments; caller provisioning permissions must already exist.
+// Extra Storage Owner/Cosmos SQL runtime grants default OFF; supply missing grants
+// separately or deliberately enable the modules. The service creates no RBAC.
+// param assignContainerRoles = true
+
 // Existing AI Services account details (from your original deployment)
 // You'll need to get these from your existing deployment
 param existingAccountName = '' // Replace with your actual account name

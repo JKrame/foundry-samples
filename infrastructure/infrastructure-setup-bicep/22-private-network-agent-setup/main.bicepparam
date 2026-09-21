@@ -25,9 +25,15 @@ param azureCosmosDBAccountResourceId = ''
 // existing resources above already have private endpoints reachable from this VNet.
 param createDependentResourcePrivateEndpoints = true
 
-// Keep true for standalone use. Caller-authorized provisioning flows can set
-// false, then grant both roles to the Project identity before data-plane use.
+// Controls explicit Project MI Storage Contributor/Cosmos Operator grants, not
+// caller permissions. Caller-authorized flows can defer these with false, then
+// grant them after provisioning. The service does not create any RBAC.
 param assignProjectStorageAndCosmosAccountRoles = true
+
+// Extra runtime grants default OFF in main.bicep (Storage Owner with account-scope
+// ABAC and Cosmos SQL Data Contributor on enterprise_memory). An operator must
+// supply missing grants, or deliberately enable these modules after reviewing scope.
+// param assignContainerRoles = true
 
 // Subscription ID where DNS zones are located (leave empty to use deployment subscription)
 // ⚠️ If set to a different subscription, ALL zones below MUST have resource groups specified

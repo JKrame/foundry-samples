@@ -1,5 +1,5 @@
 ---
-description: This set of templates demonstrates how to set up Foundry Agent Service with virtual network isolation, where the project and account capability hosts are created implicitly from the project's capabilitySettings rather than declared as explicit resources.
+description: Network-secured Foundry Agent Service with account network injection, project capabilitySettings, implicit capability hosts, and explicit deployment-managed or operator-managed RBAC.
 page_type: sample
 products:
 - azure
@@ -10,921 +10,302 @@ languages:
 - json
 ---
 
-# Microsoft Foundry: Network-Secured Agent Setup with capabilitySettings (Implicit Capability Hosts)
+# Microsoft Foundry: Network-Secured Agent Setup with Implicit Capability Hosts
 
-> **Scenario 22 — what differs from [template 15](https://github.com/microsoft-foundry/foundry-samples/tree/main/infrastructure/infrastructure-setup-bicep/15-private-network-standard-agent-setup)**
->
-> This template is a derivative of the standard network-secured agent setup (template 15). It keeps the identical
-> BYO VNet + private-endpoint networking, BYO Storage / Cosmos DB / AI Search, model deployment, ACR, and Azure Monitor
-> private-link wiring. The **only** functional differences are:
->
-> 1. **`capabilitySettings` on the project** — `modules-network-secured/ai-project-identity.bicep` sets
->    `properties.capabilitySettings = { documentStore: <cosmosId>, vectorStore: <searchId>, blobStore: <storageId> }`
->    (the BYO store ARM resource IDs). Declaring `capabilitySettings` makes AccountRP auto-provision the project's
->    connections and its capability host.
-> 2. **No explicit capability-host resources** — both the project capability host
->    (`add-project-capability-host.bicep`) and the opt-in account capability host
->    (`add-account-capability-host.bicep`) modules have been **removed**. They are now **implicit resources**:
->    - The **account** capability host is created by the platform from `networkInjections.scenario='agent'` on the
->      account (`ai-account-identity.bicep`) — unchanged from template 15, just no opt-in override or
->      `createAccountCapabilityHost` flag.
->    - The **project** capability host is created by AccountRP from the project's `capabilitySettings`.
-> 3. **Container-scoped role assignments are off by default** (`assignContainerRoles=false`). The implicit capability
->    host provisions the agent blob/thread containers and their data-plane role assignments during create, so the
->    template no longer pre-creates them. Set `assignContainerRoles=true` only to pre-assign against already-existing
->    containers.
->
-> Everything else (account/project SMI roles for Cosmos DB Operator, Storage Blob Data Contributor, AI Search
-> Index/Service Contributor, private endpoints, DNS, ACR, AMPLS) is identical to template 15.
+**Scenario 22** uses a network-injected Foundry account and project `capabilitySettings` to select BYO Storage, Cosmos DB, and AI Search resources. The templates do not declare account or project CapabilityHost resources.
 
-> **NEW**
-> For support on deploying the right network isolation template, check out the [GitHub Copilot for Azure skill for private networking](https://github.com/microsoft/GitHub-Copilot-for-Azure/blob/main/plugin/skills/microsoft-foundry/resource/private-network/private-network.md) set-up!
+> [!IMPORTANT]
+> **Implicit capability-host provisioning does not provision any RBAC.** The service does not create Azure role assignments or Cosmos DB SQL data-plane role assignments. Enabled Bicep role-assignment modules create grants under the deployment identity; an authorized operator must supply any grants that those modules skip. Creating hosts, connections, or containers does not grant access to them.
 
-> **IMPORTANT**
-> Please note this template does not support using Agent tools behind a VNET. Please refer to [template 19](../19-private-network-agent-tools/) and the [TESTING-GUIDE.md](../19-private-network-agent-tools/tests/TESTING-GUIDE.md) to ensure tool traffic also goes through your vnet.
+> [!NOTE]
+> **Network injection is the prerequisite for the implicit-host flow, not `capabilitySettings` alone.** A new account receives `properties.networkInjections` with `scenario: 'agent'`, its dedicated subnet ID, and `useMicrosoftManagedNetwork: false`. A project's `capabilitySettings` supplies the three backing-store ARM IDs. See the [account declaration](modules-network-secured/ai-account-identity.bicep#L27-L57) and [project declaration](modules-network-secured/ai-project-identity.bicep).
 
----
-## Overview
-This infrastructure-as-code (IaC) solution deploys a network-secured agent environment with private networking and role-based access control (RBAC).
+## Choose an entry point
 
-Standard setup supports private network isolation through utilizing **Bring Your Own Virtual Network (BYO VNet)** approach, also known as **custom VNet support with subnet delegation.** Please note this template does not support using Agent tools behind a VNET. Please use [template 19](../19-private-network-agent-tools/) for this.
+| Goal | Entry point | What is written |
+| --- | --- | --- |
+| Create a network-secured account/project and create or reuse its supporting resources | [main.bicep](main.bicep) | New account with network injection unless an existing account is supplied; project with `capabilitySettings`; networking and enabled RBAC modules |
+| Add a new project to an already network-injected account | [add-project.bicep](add-project.bicep) | New project with a timestamp-derived suffix; enabled Project managed-identity grants; no account network update |
+| Update a named existing project in place | [add-existing-project.bicep](add-existing-project.bicep) | Project **PUT**, explicit connection writes, and optional RBAC modules; no account network update |
 
-This implementation gives you full control over the inbound and outbound communication paths for your agent. You can restrict access to only the resources explicitly required by your agent, such as storage accounts, databases, or APIs, while blocking all other traffic by default. This approach ensures that your agent operates within a tightly scoped network boundary, reducing the risk of data leakage or unauthorized access. By default, this setup simplifies security configuration while enforcing strong isolation guarantees, ensuring that each agent deployment remains secure, compliant, and aligned with enterprise networking policies.
+For all three paths, follow [Provisioning and runtime RBAC](#provisioning-and-runtime-rbac) before using the data plane. The entry points have **different RBAC switches and defaults**; do not assume the main-template flags apply to the other two.
 
----
+### How this differs from Scenario 15
 
-## When to Use This Template
+- Account and project hosts are implicit; there is no `createAccountCapabilityHost` parameter or explicit host module. The account must already be network injected when an existing account is reused.
+- Project `capabilitySettings` contains `documentStore`, `vectorStore`, and `blobStore` resource IDs. The [main project module](modules-network-secured/ai-project-identity.bicep) and [new-project module](modules-network-secured/ai-project-identity-unique.bicep) do not declare the three backing-store connections themselves. The [existing-project module](modules-network-secured/ai-existing-project-connections.bicep) **does** declare explicit child connections in addition to its project PUT.
+- Main and new-project deployments default `assignContainerRoles` to `false`. This disables their explicit extra data-plane grants; **it is not a request for the service to create the grants instead**.
 
-Use this template when you need:
-- **Full end-to-end network isolation** — All resources behind private endpoints with no public internet access
-- **BYO VNet control** — You manage your own virtual network, subnets, and network security groups
-- **Standard agent setup with BYO resources** — Customer-managed Storage, Cosmos DB, and AI Search for data residency and compliance
-- **System Assigned Managed Identity** — Simplified identity management with platform-managed credentials
-
-### Template Decision Guide
-
-Use the table below to choose the right infrastructure template for your scenario:
-
-| Template | Agent Type | Networking | Identity | Key Use Case |
-|----------|-----------|------------|----------|-------------|
-| [**15** (this template)](../15-private-network-standard-agent-setup/) | Standard (BYO resources) | BYO VNet + Private Endpoints | System Assigned MI | E2E network isolation with full agent capabilities |
-| [**19**](../19-private-network-agent-tools/) | Standard (BYO resources) | BYO VNet + Private Endpoints | System Assigned MI | Same as 15 **plus** tools behind VNet (MCP, OpenAPI, Functions, A2A) |
-| [**17**](../17-private-network-standard-user-assigned-identity-agent-setup/) | Standard (BYO resources) | BYO VNet + Private Endpoints | **User Assigned MI** | Same as 15 but with user-managed identity |
-| [**16**](../16-private-network-standard-agent-apim-setup-preview/) | Standard (BYO resources) | BYO VNet + Private Endpoints | System Assigned MI | Same as 15 **plus** private APIM integration (preview) |
-| [**18**](../18-managed-virtual-network-preview/) | Standard (BYO resources) | **Managed VNet** (Microsoft-managed) | System Assigned MI | Network isolation without managing your own VNet (preview) |
-| [**15a**](../15a-private-network-evaluation-only-setup/) | Evaluation only | BYO VNet + Private Endpoints | System Assigned MI | Minimal setup for evaluation — no Cosmos DB, AI Search, or capability host |
-| [**11**](../11-private-network-basic-vnet/) | **Basic** (platform-managed) | BYO VNet injection | System Assigned MI | Basic agents with VNet isolation — no BYO resources needed |
-| [**41**](../41-standard-agent-setup/) | Standard (BYO resources) | **Public** (no VNet) | System Assigned MI | Standard agents without network isolation |
-| [**40**](../40-basic-agent-setup/) | **Basic** (platform-managed) | **Public** (no VNet) | System Assigned MI | Simplest setup — no BYO resources, no private networking |
-
----
+For other deployment models, see [Scenario 15](../15-private-network-standard-agent-setup/), [Scenario 17 for user-assigned identity](../17-private-network-standard-user-assigned-identity-agent-setup/), or [Scenario 19 for tools behind a VNet](../19-private-network-agent-tools/). Scenario 22 does not configure private tool traffic for MCP, OpenAPI, Functions, or A2A.
 
 ## Deploy to Azure
 
 [![Deploy To Azure](https://raw.githubusercontent.com/Azure/azure-quickstart-templates/master/1-CONTRIBUTION-GUIDE/images/deploytoazure.svg?sanitize=true)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fmicrosoft-foundry%2Ffoundry-samples%2Frefs%2Fheads%2Fmain%2Finfrastructure%2Finfrastructure-setup-bicep%2F22-private-network-agent-setup%2Fazuredeploy.json)
 
----
+The button loads this scenario's [ARM template](azuredeploy.json) from upstream `main`. While the scenario is still in an unmerged PR, use the Bicep sources from the PR checkout instead. The button does not grant the deployer or Project identity any permissions beyond the role resources actually enabled in the template.
 
 ## Prerequisites
 
-1. **Active Azure subscription with appropriate permissions**
-  - **Foundry Account Owner**: Needed to create the Microsoft Foundry account and project.
-  - **Owner or Role Based Access Administrator**: Needed to assign RBAC on the Azure resources used by this template.
-  - **Foundry User**: Needed to create and use agents, projects, or evaluation workloads after deployment.
+1. **An approved deployment identity and scope.** It needs permission to create/update the selected account, project, network, data, and optional monitoring/registry resources. Enabled Azure RBAC modules also require `Microsoft.Authorization/roleAssignments/write` at each target scope; Cosmos SQL role assignments use the Cosmos resource-provider permission. Role Based Access Administrator alone does not provide general resource-deployment access. Creating a resource group requires permission at subscription scope.
+2. **Provisioning-caller access to the backing stores before the Project PUT.** See the identity and timing distinctions below. Project MI grants emitted later in the deployment do not authorize the earlier caller operation.
+3. **A supported location and model/SKU/quota combination.** Check the [main location allowlist and model parameters](main.bicep). An allowed location is not a capacity reservation or proof that every model version/SKU is offered there.
+4. **A dedicated agent subnet per Foundry account**, delegated exclusively to `Microsoft.App/environments`, plus a private-endpoint subnet and working private DNS. Check for address overlap with existing/peered networks and service-reserved ranges before deployment.
+5. **A private-network-connected client** for data-plane checks, such as a jump host or workstation connected by VPN/ExpressRoute. Azure Bastion connects to a VM; it is not itself a data-plane client. Do not enable public access merely to bypass a private DNS/connectivity issue.
+6. **Azure CLI and Bicep**, and the required registered providers: `Microsoft.CognitiveServices`, `Microsoft.Network`, `Microsoft.App`, `Microsoft.Storage`, `Microsoft.DocumentDB`, and `Microsoft.Search`. Optional resources require `Microsoft.ContainerRegistry`, `Microsoft.Insights`, and `Microsoft.OperationalInsights` as applicable.
 
-1. **Register Resource Providers**
+The [preflight checks](../deployment-tools/preflight/README.md) help identify provider registration, subnet conflicts, and name reservations. They do not replace RBAC or readiness verification.
 
-   Make sure you have an active Azure subscription that allows registering resource providers. For example, subnet delegation requires the Microsoft.App provider to be registered in your subscription. If it's not already registered, run the commands below:
+## Provisioning and runtime RBAC
 
-   ```bash
-   az provider register --namespace 'Microsoft.KeyVault'
-   az provider register --namespace 'Microsoft.CognitiveServices'
-   az provider register --namespace 'Microsoft.Storage'
-   az provider register --namespace 'Microsoft.Search'
-   az provider register --namespace 'Microsoft.Network'
-   az provider register --namespace 'Microsoft.App'
-   az provider register --namespace 'Microsoft.ContainerService'
-   ```
-
-1. Network administrator permissions (if operating in a restricted or enterprise environment)
+### Three different identities
 
-1. Sufficient quota for all resources required by this template in the target Azure region, including model deployment quota.
-    * If no parameters are passed in, this template creates an Microsoft Foundry resource, Foundry project, Azure Cosmos DB for NoSQL, Azure AI Search, and Azure Storage account
-1. Azure CLI installed and configured on your local workstation or deployment pipeline server
+| Identity | Purpose | Who assigns its permissions |
+| --- | --- | --- |
+| **Deployment / ARM caller** | Issues Bicep deployments and Account/Project PUTs; authorizes caller-based backing-resource provisioning | An authorized administrator/platform setup, **before** the operation. None of these templates grants roles to the caller. |
+| **Project system-assigned managed identity** | Authenticates the project's runtime access to BYO Storage, Cosmos DB, and Search | Enabled Bicep role modules, or an authorized operator for deferred/pre-existing grants |
+| **User/application calling the Foundry data plane** | Creates/uses agents and conversations through the project endpoint | An authorized administrator assigns the appropriate Foundry data-plane role. This is separate from the Project MI's access to its backing stores. |
 
-> **💡 Recommended**: Run the [preflight check](../deployment-tools/preflight/README.md) before deploying to catch common misconfigurations (provider registration, subnet conflicts, soft-deleted accounts) before they surface as cryptic ARM errors mid-deploy.
-
----
-
-## Pre-Deployment Steps
-
-### Networking Requirements
-1. Review network requirements and plan Virtual Network address space (e.g., 192.168.0.0/16 or an alternative non-overlapping address space)
-
-2. Two subnets are needed as well:
-    - **Agent Subnet** (e.g., 192.168.0.0/24): Hosts Agent client for Agent workloads, delegated to Microsoft.App/environments. The recommended size should be /24 for this delegated subnet.
-    - **Private endpoint Subnet** (e.g. 192.168.1.0/24): Hosts private endpoints
-    - Ensure that the address spaces for the used VNET does not overlap with any existing networks in your Azure environment or reserved IP ranges like the following: 169.254.0.0/16,172.30.0.0/16,172.31.0.0/16,192.0.2.0/24,0.0.0.0/8,127.0.0.0/8,100.100.0.0/17,100.100.192.0/19,100.100.224.0/19,100.64.0.0/11.
-    This includes all address space(s) you have in your VNET if you have more than one, and peered VNETs.
+The account has its own managed identity, but the backing-store role modules in this scenario target `aiProject.outputs.projectPrincipalId`, **not** the account identity. Source: [main role-module calls](main.bicep), [storage role](modules-network-secured/azure-storage-account-role-assignment.bicep), [Cosmos operator role](modules-network-secured/cosmosdb-account-role-assignment.bicep), and [Search roles](modules-network-secured/ai-search-role-assignments.bicep).
 
-  > **Notes:**
-  - If you do not provide an existing virtual network, the template will create a new virtual network with the default address spaces and subnets described above. If you use an existing virtual network, make sure it already contains two subnets (Agent and Private Endpoint) before deploying the template.
-  - The account-level capability host is created implicitly by the platform via `networkInjections.scenario='agent'` on the Foundry account (see `modules-network-secured/ai-account-identity.bicep`). Only one capability host per account is allowed, so `main.bicep` does not declare a second one for fresh deployments. Set `createAccountCapabilityHost=true` only when the account has no capability host — BYO accounts without one, or after running `deleteCapHost.sh` (see [Account Deletion Prerequisites and Cleanup Guidance](#account-deletion-prerequisites-and-cleanup-guidance)).
-  - You must ensure the subnet is exclusively delegated to __Microsoft.App/environments__ and cannot be used by any other Azure resources.
+### Before provisioning: authorize the ARM caller
 
+For caller-authorized provisioning, arrange these effective permissions on the chosen stores before creating/updating the project:
 
+- **Cosmos DB Operator** on the Cosmos DB account.
+- **Storage Blob Data Contributor** on the Storage account.
+- The resource-deployment and role-assignment permissions needed for the template operations at their actual scopes, including any cross-subscription resources.
 
-### Limitations / Known Issues
+An authorized administrator must create these assignments; the service does not. If the stores are also being created by the same deployment, arrange approved inherited access on a dedicated deployment scope or provision and permission the stores first and supply their existing resource IDs. Do not assume the caller gains these roles from the template's Project MI assignments.
 
-1. The delegated agent subnet must be exclusively used by a single Foundry account. It cannot be shared across accounts.
-2. The Foundry resource and the virtual network must be in the same Azure region. BYO resources (Storage, Cosmos DB, AI Search) may be in different regions.
-3. For the virtual network IP range, you may use any Private Class A, B or C IP range. Private Class A IP address ranges (10.x.x.x) are only supported in the following regions: **Australia East, Brazil South, Canada East, East US, East US 2, France Central, Germany West Central, Italy North, Japan East, South Africa North, South Central US, South India, Spain Central, Sweden Central, UAE North, UK South, West US, West US 3.** Use Class B (172.16.x.x) or C (192.168.x.x) ranges for other regions. You may not use any other IP range that overlaps to the list above or uses public IP ranges.
-4. This template does **not** support tools (MCP servers, OpenAPI tools, Azure Functions, A2A) behind the VNet. Use [template 19](../19-private-network-agent-tools/) for that scenario.
-5. There is no upgrade path from BYO VNet (this template) to Managed Virtual Network (template 18). A Foundry resource redeployment is required.
-6. All projects within the same Foundry account share model deployments. Per-project model isolation is not supported.
-7. Cosmos DB is deployed as single-region. Multi-region replication must be configured manually post-deployment.
-8. When reusing an existing Foundry account (`existingAiFoundryAccountResourceId`), the template will not create a new model deployment if `skipModelDeployment` is set to `true`. The required model deployment(s) must already exist on the BYO account.
+For the main-template caller-authorized flow, `assignProjectStorageAndCosmosAccountRoles=false` defers the **Project MI's** Storage Contributor and Cosmos Operator grants. It does **not** grant the caller access and does not disable Search roles. After provisioning, grant the deferred roles to the Project identity before runtime use. The [main-template flag](main.bicep) is not available in the two add-project entry points.
 
-### Account Deletion Prerequisites and Cleanup Guidance
+### Which RBAC resources the templates create
 
-Before deleting an **Account** resource, it is essential to first delete the associated **Account Capability Host**. Failure to do so may result in residual dependencies—such as subnets and other provisioned resources (e.g., ACA applications)—remaining linked to the capability host. This can lead to errors such as **"Subnet already in use"** when attempting to reuse the same subnet in a different account deployment.
+All grants in this table target the **Project MI**. “Enabled” means **ARM deploys a role-assignment resource from Bicep**, not that the Foundry service creates an assignment.
 
-**Cleanup Options**
+| Grant and actual scope | Main | New additional project | Existing project | Source |
+| --- | --- | --- | --- | --- |
+| Storage Blob Data Contributor, Storage **account** | `assignProjectStorageAndCosmosAccountRoles` (default `true`) | Always | `assignRoles` (default `true`) | [Storage account role](modules-network-secured/azure-storage-account-role-assignment.bicep) |
+| Cosmos DB Operator, Cosmos **account** | Same flag | Always | `assignRoles` | [Cosmos account role](modules-network-secured/cosmosdb-account-role-assignment.bicep) |
+| Search Index Data Contributor and Search Service Contributor, Search **service** | Always | Always | `assignRoles` | [Search roles](modules-network-secured/ai-search-role-assignments.bicep) |
+| Storage Blob Data Owner, Storage **account**, with the module's ABAC condition | `assignContainerRoles` (default `false`) | `assignContainerRoles` (default `false`) | `assignRoles` (default `true`) | [Main variant](modules-network-secured/blob-storage-container-role-assignments.bicep), [additional/existing-project variant](modules-network-secured/blob-storage-container-role-assignments-unique.bicep) |
+| Cosmos DB Built-in Data Contributor, SQL data plane, **`enterprise_memory` database** | `assignContainerRoles` | `assignContainerRoles` | `assignRoles` | [Cosmos SQL role](modules-network-secured/cosmos-container-role-assignments.bicep) |
+| AcrPull, optional ACR **registry** | `enableContainerRegistry` (default `true`) | Not declared | Not declared | [Registry role](modules-network-secured/container-registry.bicep) |
 
-**1. Full Account Removal**: To completely remove an account, you must delete and purge the account. Simply deleting the account is not sufficient, you must purge so that deletion of the associated capability host is triggered. The service will automatically handle the removal of the capability host and any linked resources in the background. To purge the account, use the following [link](https://learn.microsoft.com/en-us/azure/ai-services/recover-purge-resources?tabs=azure-portal#purge-a-deleted-resource). Please allow approximately max of 20 minutes for all resources to be fully unlinked from the account.
+The flags are declared in [main.bicep](main.bicep), [add-project.bicep](add-project.bicep), and [add-existing-project.bicep](add-existing-project.bicep).
 
-**2. Retain Account, Remove Capability Host**: If you intend to retain the account but remove the capability host, execute the script `deleteCapHost.sh` located in this folder. After deletion, allow approximately max of 20 minutes for all resources to be fully unlinked from the account. To recreate the capability host, redeploy `main.bicep` with `createAccountCapabilityHost=true`.
+> [!WARNING]
+> A default main/new-project deployment leaves `assignContainerRoles=false`. It therefore omits the Blob Data Owner and Cosmos SQL data-role modules. An operator must supply any missing runtime grants, or deliberately enable the template modules after reviewing their scopes and existing assignments. **A successful Project/CapabilityHost provisioning state is not proof that runtime RBAC is complete.** Do not skip these grants on the assumption that an implicit host will create them later.
 
-> **Note**: The capability host name to enter when prompted by `deleteCapHost.sh` follows the platform convention `<accountName>@aml_aiagentservice` for implicitly-created hosts. When `createAccountCapabilityHost=true` was used previously, the same conventional name applies (it is the module's default).
+Despite their filenames and the `assignContainerRoles` flag, these modules do **not** all assign roles at individual container scope. The Storage Owner role is account-scoped; its existing ABAC expression constrains selected blob-tag/filter actions, not every action in that role. The Cosmos SQL role is database-scoped. Neither should be described as universal per-project container isolation. Review the linked modules and your access policy rather than assuming the names imply narrower permissions.
 
+The role modules reference the project principal/internal ID, so they depend on project creation/update. There is no explicit CapabilityHost deployment resource to which they can add a `dependsOn` readiness barrier. Verify Project/host and backing-resource readiness independently; ARM file order is not execution order. Source: [project outputs](modules-network-secured/ai-project-identity.bicep) and [workspace-ID formatting](modules-network-secured/format-project-workspace-id.bicep).
 
-> **Important**: Before deleting the account capability host, ensure that the **project capability host** is deleted.
+### After provisioning: verify runtime access
 
-### Template Customization
+1. Resolve the **current** Project principal ID and internal ID. A recreated project can have a new identity even when its display name is reused.
+2. Inspect effective Azure RBAC for that principal on Storage and Search, and the required Cosmos account permissions. Include inherited assignments and applicable conditions in the review.
+3. Inspect **Cosmos SQL data-plane role assignments separately**. Cosmos DB Operator and subscription Owner are not substitutes for Cosmos SQL data access.
+4. Supply deferred/missing grants through an approved template or operator workflow, allow propagation, and verify the required database/containers and private connectivity.
+5. Give the test caller the required project data-plane access (for example the built-in **Foundry User** role, ID `53ca6127-db72-4b80-b1b0-d745d6d5456d`, where appropriate). The templates here do not assign that role to the person/application running the tests.
+6. Run data-plane validation from the private-connected client. Keep identity/RBAC failures separate from DNS, private-endpoint, model-deployment, and provisioning-state failures.
 
-Note: If not provided, the following resources will be created automatically for you:
-- VNet and two subnets
-- Azure Cosmos DB for NoSQL
-- Azure AI Search
-- Azure Storage
-- Azure Container Registry (Premium SKU) with private endpoint *(when `enableContainerRegistry=true`)*
+See the [Foundry RBAC guidance](https://learn.microsoft.com/en-us/azure/ai-foundry/concepts/rbac-azure-ai-foundry?pivots=fdp-project) and [Cosmos DB data-plane RBAC guidance](https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/security/how-to-grant-data-plane-access).
 
-#### Parameters
+## Deployment flow and architecture
 
-| Parameter | Description | Default | Required |
-|-----------|-------------|---------|----------|
-| `location` | Azure region for deployment | `eastus` | Yes |
-| `aiServices` | Base name for the AI Services resource | `aiservices` | No |
-| `firstProjectName` | Name for the Foundry project | `project` | No |
-| `modelName` | Model to deploy | `gpt-4.1` | No |
-| `modelFormat` | Model provider | `OpenAI` | No |
-| `modelVersion` | Model version | `2025-04-14` | No |
-| `modelSkuName` | Model deployment SKU | `GlobalStandard` | No |
-| `modelCapacity` | Tokens per minute (TPM) capacity | `30` | No |
-| `skipModelDeployment` | When `true`, skip creating a model deployment. Recommended when reusing an existing Foundry account that already has the required model deployments. | `false` | No |
-| `vnetName` | Virtual Network name. When `existingVnetResourceId` is set, the name is derived from that resource ID and this parameter is ignored. When creating a new VNet, leave empty to use the generated default. | `''` | No |
-| `agentSubnetName` | Subnet name for agent workloads | `agent-subnet` | No |
-| `agentSubnetPrefix` | Address prefix for agent subnet | `192.168.0.0/24` | No |
-| `peSubnetName` | Subnet name for private endpoints | `pe-subnet` | No |
-| `peSubnetPrefix` | Address prefix for PE subnet | `192.168.1.0/24` | No |
-| `existingVnetResourceId` | Full ARM Resource ID of an existing VNet | `''` (creates new) | No |
-| `reuseExistingSubnets` | When `true` and `existingVnetResourceId` is set, the template will reference your existing subnets without modifying them. Use this when your subnets are already configured by your platform team (NSG, route tables, private endpoint network policies) and tenant policies forbid changes. | `false` | No |
-| `vnetAddressPrefix` | Address space for new VNet | `192.168.0.0/16` | No |
-| `aiSearchResourceId` | ARM Resource ID of existing AI Search | `''` (creates new) | No |
-| `azureStorageAccountResourceId` | ARM Resource ID of existing Storage account | `''` (creates new) | No |
-| `azureCosmosDBAccountResourceId` | ARM Resource ID of existing Cosmos DB | `''` (creates new) | No |
-| `existingAiFoundryAccountResourceId` | Full ARM Resource ID of an existing Microsoft Foundry (Cognitive Services / AIServices) account to reuse. When set, the template will not create a new account. | `''` (creates new) | No |
-| `assignContainerRoles` | When `true`, pre-assign the container-scoped data-plane roles (Storage Blob Data Owner / Cosmos Built-in Data Contributor on the agent containers). Leave `false`: the **implicit** project capability host provisions these containers and their role assignments during create. | `false` | No |
-| `dnsZonesSubscriptionId` | Subscription ID for existing DNS zones. Accepts either a bare GUID (`<subscription-id>`) or a full ARM subscription path (`/subscriptions/<subscription-id>`); the template normalizes the value internally. | `''` (current sub) | No |
-| `existingDnsZones` | Map of DNS zone names to resource groups | All empty (creates new) | No |
-| `enableContainerRegistry` | When `true`, creates an Azure Container Registry (Premium SKU) with a private endpoint in the PE subnet, a `privatelink.azurecr.io` DNS zone, and an AcrPull role assignment for the project managed identity. | `true` | No |
-| `createDependentResourcePrivateEndpoints` | When `true`, creates private endpoints and DNS zone groups for AI Search, Storage, and Cosmos DB. Set `false` only when the supplied existing resources already have private endpoints reachable from the selected VNet. The new Foundry account private endpoint is always created. | `true` | No |
-| `assignProjectStorageAndCosmosAccountRoles` | Assigns Cosmos DB Operator and Storage Blob Data Contributor to the Project managed identity. Set `false` for caller-authorized `capabilitySettings` provisioning, then grant both roles to the Project identity before data-plane operations. | `true` | No |
-| `developerIpCidr` | Developer IP CIDR to allowlist for ACR push access (e.g., `203.0.113.0/26`). When set, enables public network access with a deny-all default + an IP allowlist rule so developers can push images. When empty, public access remains fully disabled. | `''` | No |
+The [Scenario 22 diagrams](diagrams/README.md) show:
 
-When `assignProjectStorageAndCosmosAccountRoles=false`, grant **Cosmos DB Operator** on the supplied Cosmos DB account and **Storage Blob Data Contributor** on the supplied Storage account to the ARM deployment caller before creating the project. The Project managed identity should not hold those two account-level roles during `capabilitySettings` provisioning. Grant them to the Project managed identity only after provisioning succeeds and before the project performs data-plane operations.
+1. Deployment/caller responsibilities versus implicit host/resource provisioning.
+2. Private-network access and Project identity usage.
 
-#### BYO Resource Details
+They replace the copied Scenario 15 images, which showed explicit host modules and a connection/role ordering that does not represent this template. Diagram arrows describe responsibilities and logical flow, not a promise that Bicep schedules modules in file order.
 
-1. **Use Existing Virtual Network and Subnets**
+## Main-template configuration
 
-To use an existing VNet and subnets, set the existingVnetResourceId parameter to the full Azure Resource ID of the target VNet and its address range, and provide the names of the two required subnets.  If the existing VNet is associated with private DNS zones, set the existingDnsZones parameter to the resource group name in which the zones are located. For example:
-- param existingVnetResourceId = "/subscriptions/<subscription-id>/resourceGroups/<resource-group-name>/providers/Microsoft.Network/virtualNetworks/<vnet-name>"
-- param agentSubnetName string = 'agent-subnet' //optional, default is 'agent-subnet'
-- param agentSubnetPrefix string = '192.168.0.0/24' //optional, default is '192.168.0.0/24'
-- param peSubnetName string = 'pe-subnet' //optional, default is 'pe-subnet'
-- param peSubnetPrefix string = '192.168.1.0/24' //optional, default is '192.168.1.0/24'
-- param dnsZonesSubscriptionId string = '' //optional, leave empty to use current subscription, or set to a subscription ID if DNS zones are in a different subscription
-- param existingDnsZones = {
+Use [main.bicepparam](main.bicepparam) as a starting point and review [main.bicep](main.bicep) for the complete parameter definitions. The values below are **template defaults**; the sample parameter file overrides some of them.
 
-         'privatelink.services.ai.azure.com': 'privzoneRG' //add resource group name where your private DNS zone is located
+| Parameter | Template default | Meaning / important constraint |
+| --- | --- | --- |
+| `location` | `eastus` | Must be in the template allowlist and support the selected services/model |
+| `aiServices` | `aiservices` | Account prefix; an RG-derived suffix is appended for a new account |
+| `firstProjectName` | `project` | Project prefix; the same RG-derived suffix is appended |
+| `displayName` / `projectDescription` | See template | Values written to the project |
+| `modelName` / `modelVersion` | `gpt-4.1` / `2025-04-14` | Validate this pair in your subscription/region |
+| `modelFormat` / `modelSkuName` / `modelCapacity` | `OpenAI` / `GlobalStandard` / `30` | Model deployment settings; not the account or Search SKU |
+| `skipModelDeployment` | `false` | Skips model creation for a **new** account when true; the existing-account branch creates no model regardless |
+| `existingAiFoundryAccountResourceId` | Empty | Reuses an account without updating its network injection; see prerequisites below |
+| `existingVnetResourceId` | Empty | Empty creates a VNet; otherwise use the supplied VNet |
+| `vnetName` | Empty | **Supply a name when creating a VNet.** With an existing VNet, the name comes from its resource ID. |
+| `agentSubnetName` / `peSubnetName` | `agent-subnet` / `pe-subnet` | A new account must use its own delegated agent subnet |
+| `vnetAddressPrefix` | Empty | New-VNet module fallback is `192.168.0.0/16` |
+| `agentSubnetPrefix` / `peSubnetPrefix` | Empty | New-VNet module derives /24 ranges at indices 0 and 1 when omitted; prefer explicit non-overlapping CIDRs |
+| `reuseExistingSubnets` | `false` | Set true to reference existing subnets without updating their configuration |
+| `aiSearchResourceId` | Empty | Full ARM ID of existing Search; otherwise create one |
+| `azureStorageAccountResourceId` | Empty | Full ARM ID of existing Storage; otherwise create one |
+| `azureCosmosDBAccountResourceId` | Empty | Full ARM ID of existing Cosmos DB; otherwise create one |
+| `createDependentResourcePrivateEndpoints` | `true` | Set false only if the BYO stores already have reachable private endpoints; the Foundry endpoint is still created |
+| `assignProjectStorageAndCosmosAccountRoles` | `true` | Controls only Project MI Storage Contributor and Cosmos Operator modules |
+| `assignContainerRoles` | `false` | Controls explicit extra Storage/Cosmos data-plane role modules; no service-created RBAC fallback |
+| `dnsZonesSubscriptionId` / `existingDnsZones` | Current subscription / empty map values | Controls reuse of service private DNS zones |
+| `enableContainerRegistry` / `developerIpCidr` | `true` / empty | Optional Premium ACR + private endpoint + Project MI AcrPull. A supplied CIDR enables ACR public access with an allowlist. |
+| `enableTracing` / `monitorLocation` | `true` / `eastus2` | Optional Log Analytics, Application Insights, and AMPLS stack |
+| `existingMonitorDnsZones` | Empty map values | Reuse or create the four Azure Monitor private DNS zones |
 
-         'privatelink.openai.azure.com': '' //Leave empty to create new private dns zone... }
+Network defaults come from [network-agent-vnet.bicep](modules-network-secured/network-agent-vnet.bicep) and [vnet.bicep](modules-network-secured/vnet.bicep). New-account/model conditions come from [ai-account-identity.bicep](modules-network-secured/ai-account-identity.bicep).
 
-💡 If subnets information is provided then make sure it exist within the specified VNet to avoid deployment errors. If subnet information is not provided, the template will create subnets with the default address space.
+### Reusing a VNet, backing stores, and DNS
 
-💡 **Reuse pre-configured subnets**: If your subnets are already configured by your platform team (NSG, route tables, `privateEndpointNetworkPolicies` set per tenant policy), set `reuseExistingSubnets = true`. This tells the template to reference the subnets without re-applying their configuration, which prevents an inadvertent reset of subnet properties on redeploy.
+- Supply the existing resource IDs, not account endpoints, for `existingVnetResourceId`, `aiSearchResourceId`, `azureStorageAccountResourceId`, and `azureCosmosDBAccountResourceId`.
+- For preconfigured subnets, set `reuseExistingSubnets=true`; check delegation, routing, network policies, and address ranges yourself. With it false, the [existing-VNet module](modules-network-secured/existing-vnet.bicep) may create/update subnets.
+- **Do not share one agent subnet between Foundry accounts.** A new account in a shared VNet still needs an unused, exclusive `Microsoft.App/environments`-delegated subnet. The private-endpoint subnet can be shared according to your network policy.
+- Set `createDependentResourcePrivateEndpoints=false` only when all three supplied backing stores already have working private endpoints reachable from the selected VNet. This preserves those endpoints; it does not establish new connectivity or permissions.
+- Keep cross-subscription resources in the same Entra tenant as the Project identity, and arrange deployment permissions at each target scope.
+- `dnsZonesSubscriptionId` accepts a subscription GUID or full subscription ARM path. When it selects another subscription, populate the relevant existing-zone resource groups; do not assume empty entries create zones in the remote subscription. Verify VNet links/DNS forwarding, especially for centrally managed zones. See [private-endpoint-and-dns.bicep](modules-network-secured/private-endpoint-and-dns.bicep).
+- The account's VNet injection is regional. Keep the account and VNet in the same region, and validate any cross-region backing-store configuration separately.
 
-⚠️ **One Foundry account per agent subnet**: You may reuse a VNet across Foundry accounts, but each network-injected account requires its own subnet delegated exclusively to `Microsoft.App/environments`. When creating a new account in an existing VNet, create a new delegated subnet and pass its name as `agentSubnetName`. The private endpoint subnet can be reused.
+### Reusing an existing Foundry account
 
-💡 **Reuse existing dependent resources and networking**: Supply `aiSearchResourceId`, `azureStorageAccountResourceId`, and `azureCosmosDBAccountResourceId`, point `existingVnetResourceId` at the shared VNet, set `reuseExistingSubnets = true`, and provide the existing private DNS zones. If those resources already have private endpoints reachable from the VNet, set `createDependentResourcePrivateEndpoints = false` to preserve them. The template still creates a private endpoint and DNS zone group for the new Foundry account.
+The [existing-account declaration](modules-network-secured/ai-account-identity.bicep#L59-L63) is reference-only. It does **not** apply `networkInjections`, create/repair the account CapabilityHost, or create a model deployment. Before choosing this path, independently verify:
 
-💡 **Cross-Subscription DNS Zones**: All DNS zones specified in `existingDnsZones` will be referenced from the subscription specified in `dnsZonesSubscriptionId`. Leave this parameter empty (default) to use the current deployment subscription, or set it to a subscription ID if your DNS zones are located in a different subscription. The parameter accepts either a bare subscription GUID or a full ARM subscription path (`/subscriptions/<subscription-id>`); the template normalizes the value internally.
+- The account is already configured for the supported private agent-network flow and its Account CapabilityHost is ready.
+- Its injection points to the intended exclusive agent subnet. Do not use this entry point to migrate an account onto another subnet.
+- Required model deployments, private endpoints, DNS, caller permissions, and runtime grants exist or are deliberately supplied by your deployment workflow.
 
-⚠️ **Important**: When `dnsZonesSubscriptionId` is set to a different subscription, ALL DNS zones in `existingDnsZones` must have resource groups specified (non-empty values). The template does not support creating new DNS zones in a different subscription. Empty resource groups are only allowed when creating zones in the current deployment subscription.
+**There is no `createAccountCapabilityHost=true` repair switch in Scenario 22.** An account without the required network injection/host is not made ready by setting `existingAiFoundryAccountResourceId`. Use a supported separate account setup/recovery workflow or deploy a fresh account with its own subnet. The project modules use the deployment resource group, so deploy into the account's resource group/subscription rather than inferring cross-scope project support from the account reference alone.
 
+### Search authentication and optional resources
 
-2. **Use an existing Azure Cosmos DB for NoSQL**
+The [new backing-resource module](modules-network-secured/standard-dependent-resources.bicep) creates Search with AAD-or-API-key authentication and disabled public network access, Storage with disabled Shared Key/public blob access, and Cosmos DB with disabled local/public access. Existing resources are referenced rather than automatically brought into policy compliance.
 
-To use an existing Cosmos DB for NoSQL resource, set cosmosDBResourceId parameter to the full Azure Resource ID of the target Cosmos DB.
-- param azureCosmosDBAccountResourceId string =  /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.DocumentDB/databaseAccounts/{cosmosDbAccountName}
+An existing Search service must accept Entra data-plane tokens. The [Search validation module](modules-network-secured/validate-search-aad-auth.bicep) checks this in the main BYO-Search path and existing-project path. The additional-new-project entry point does not invoke that check; validate it before deployment. Review approved changes with the Search owner rather than enabling public access to work around an authentication error.
 
+[Optional ACR](modules-network-secured/container-registry.bicep) adds a registry endpoint and explicit AcrPull assignment. [Optional tracing](modules-network-secured/application-insights.bicep) creates an AppInsights account connection using its connection string, plus the [AMPLS private ingestion path](modules-network-secured/monitor-private-link-scope.bicep). Do not describe all optional connections as keyless or claim that these options grant the caller Foundry access.
 
-3. **Use an existing Azure AI Search resource**
+## Deploy and verify
 
-To use an existing Azure AI Search resource, set aiSearchServiceResourceId parameter to the full Azure resource Id of the target Azure AI Search resource.
- - param aiSearchResourceId string = /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Search/searchServices/{searchServiceName}
+1. Select a new disposable deployment scope or an explicitly approved existing scope. Establish the caller permissions and networking prerequisites first.
+2. Edit the parameter file and review the actual role flags for that entry point.
+3. Run what-if and inspect the intended resource/role changes. What-if does not enumerate every service-side effect of implicit provisioning or prove runtime authorization.
+4. Deploy once. If a PUT is accepted but provisioning is still running, observe status with GETs rather than repeatedly submitting writes.
 
-> **AAD auth is required on the existing service.** Foundry connects to Search with
-> `authType=AAD`, so the service must accept Microsoft Entra (AAD) data-plane tokens
-> (local auth disabled, or `authOptions` includes an `aadOrApiKey` block). A new
-> Search service defaults to API-keys-only, which rejects AAD and makes agents fail
-> with HTTP 403. When you bring an existing service, the template checks its live
-> state and stops the deployment early with the exact fix command if it is
-> API-keys-only. To enable AAD before deploying:
-> ```bash
-> az search service update --name <search-name> --resource-group <search-rg> \
->   --subscription <search-sub> --auth-options aadOrApiKey \
->   --aad-auth-failure-mode http401WithBearerChallenge
-> ```
-
-> **AI Search → AI Services connectivity**: This template configures AI Services with `networkAcls.bypass: AzureServices`, which allows Azure AI Search to reach AI Services through the trusted-services bypass. This works for most scenarios. If your security policy requires removing the bypass (setting it to `None`), deploy [Shared Private Links](../deployment-tools/networking/README.md) from AI Search to AI Services instead — this creates a private endpoint from AI Search's managed infrastructure directly into AI Services via Private Link.
-
-
-4. **Use an existing Azure Storage account**
-
-To use an existing Azure Storage account, set aiStorageAccountResourceId parameter to the full Azure resource Id of the target Azure Storage account resource.
-- param aiStorageAccountResourceId string = /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Storage/storageAccounts/{storageAccountName}
-
-
-5. **Use an existing Microsoft Foundry account**
-
-To reuse an existing Microsoft Foundry (Cognitive Services / AIServices kind) account instead of creating a new one, set `existingAiFoundryAccountResourceId` to the full Azure Resource ID of the target account. The template will reference the existing account (cross-RG / cross-subscription aware) and skip the deterministic-suffix account creation path (which would otherwise create a new account on every redeploy).
-
-- param existingAiFoundryAccountResourceId string = '/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.CognitiveServices/accounts/{accountName}'
-- param skipModelDeployment bool = true  // recommended when the BYO account already has the required model deployment(s)
-- param createAccountCapabilityHost bool = false  // set true ONLY if the BYO account has no capability host yet
-
-💡 **When to use this**: bring-your-own-account is intended for scenarios where the Foundry account is provisioned ahead of time by a platform team or landing zone, and the workload deployment must reuse it (for compliance, naming standards, or to avoid orphaned accounts on retry).
-
-⚠️ **Important**: When `existingAiFoundryAccountResourceId` is set, the required model deployment(s) must already exist on the BYO account if `skipModelDeployment = true`. The agent service depends on at least one model deployment matching `modelName` / `modelVersion` to function.
-
-⚠️ **Capability host on BYO accounts**: If your BYO account already has a capability host (one created via `networkInjections.scenario='agent'` at account creation, or a previous explicit creation), leave `createAccountCapabilityHost=false`. Set it to `true` only when the account has no capability host — only one capability host per account is allowed and a second create will fail.
-
----
-
-## Deploy the bicep template
-
-Choose your deployment method: Use the "Deploy to Azure" button from the provided README for an guided experience in Azure Portal
-
-**Option 1: Automatic deployment**
-Click the deploy to Azure button above to open the Azure portal and deploy the template directly.
-- Fill in the parameters as needed, including the existing VNet and subnets if applicable.
-
-
-**Option 2: Manually deploy the bicep template**
-- **Create a New (or Use Existing) Resource Group**
-
-   ```bash
-   az group create --name <new-rg-name> --location <your-rg-region>
-   ```
-- Deploy the main.bicep file
-  - Edit the main.bicepparams file to use an existing Virtual Network & subnets, Azure Cosmos DB, Azure Storage, and Azure AI Search.
-
-   ```bash
-      az deployment group create --resource-group <your-resource-group> --template-file main.bicep --parameters main.bicepparam
-   ```
-
-> **Note:** To access a private Foundry resource securely, use one of the following:
-> - A VM or jump box on the virtual network, optionally accessed through Azure Bastion
-> - Azure VPN Gateway
-> - Azure ExpressRoute
-
-### Cleanup
-
-To delete all resources created by this template:
-
-```bash
-az group delete --name <your-resource-group> --yes --no-wait
-```
-
-> **Important**: If you need to reuse the same subnet, follow the [Account Deletion Prerequisites and Cleanup Guidance](#account-deletion-prerequisites-and-cleanup-guidance) to properly purge the account and wait for the capability host to fully unlink (~20 minutes).
-
-> **💡 Tip**: For VNet-injection deployments, use the [cleanup tool](../deployment-tools/cleanup/README.md) it handles the required deletion order (project caphost → account caphost → purge → SAL wait) automatically.
-
----
-
-## Network Secured Agent Project Architecture Deep Dive
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Secure Access (VPN Gateway / ExpressRoute / Azure Bastion)         │
-└──────────────────────────────────┬──────────────────────────────────┘
-                                   │
-                    ┌──────────────▼──────────────┐
-                    │   Microsoft Foundry          │
-                    │   (publicNetworkAccess:      │
-                    │        DISABLED)             │
-                    │                              │
-                    │  ┌────────────────────────┐  │
-                    │  │   Foundry Project       │  │
-                    │  │   (Agent Workspace)     │  │
-                    │  └───────────┬────────────┘  │
-                    └──────────────┼──────────────┘
-                                   │ Subnet Delegation
-                    ┌──────────────▼──────────────┐
-                    │   BYO Virtual Network        │
-                    │   (192.168.0.0/16)           │
-                    │                              │
-                    │  ┌──────────────────────┐    │
-                    │  │ Agent Subnet          │   │
-                    │  │ (192.168.0.0/24)      │   │  ◄── Delegated to
-                    │  │ Microsoft.App/envs    │   │      Microsoft.App/environments
-                    │  └──────────────────────┘    │
-                    │                              │
-                    │  ┌──────────────────────┐    │
-                    │  │ PE Subnet             │   │
-                    │  │ (192.168.1.0/24)      │   │
-                    │  │                       │   │
-                    │  │ ┌────────┐ ┌────────┐ │   │
-                    │  │ │Storage │ │Cosmos  │ │   │  ◄── Private endpoints
-                    │  │ └────────┘ └────────┘ │   │      (no public access)
-                    │  │ ┌────────┐ ┌────────┐ │   │
-                    │  │ │Search  │ │Foundry │ │   │
-                    │  │ └────────┘ └────────┘ │   │
-                    │  └──────────────────────┘    │
-                    └──────────────────────────────┘
-```
-
-> **Tip:** For detailed layer-by-layer deployment diagrams, see the `diagrams/` folder.
-
-### Core Components
-
-**Microsoft Foundry** resource
-- Central orchestration point
-- Manages service connections
-- Set networking and policy configurations
-
-**Foundry** project
-- Defines the workspace configuration
-- Service integration
-- Agents are created within a specific project, and each project acts as an isolated workspace. This means:
-  - All agents in the same project share access to the same file storage, thread storage (conversation history), and search indexes.
-  - Data is isolated between projects. Agents in one project cannot access resources from another. Projects are currently the unit of  sharing and isolation in Foundry. See the what is AI foundry article for more information on Foundry projects.
-
-**Bring Your Own (BYO) Azure Resources**: ensures all sensitive data remains under customer control. All agents created using our service are stateful, meaning they retain information across interactions. With this setup, agent states are automatically stored in customer-managed, single-tenant resources. The required Bring Your Own Resources include:
-- BYO File Storage: All files uploaded by developers (during agent configuration) or end-users (during interactions) are stored directly in the customer’s Azure Storage account.
-- BYO Search: All vector stores created by the agent leverage the customer’s Azure AI Search resource.
-- BYO Thread Storage: All customer messages and conversation history will be stored in the customer’s own Azure Cosmos DB account.
-
-By bundling these BYO features (file storage, search, and thread storage), the standard setup guarantees that your deployment is secure by default. All data processed by Microsoft Foundry Agent Service is automatically stored at rest in your own Azure resources, helping you meet internal policies, compliance requirements, and enterprise security standards.
-
-### Azure Resources Created
-
-Microsoft Foundry (Cognitive Services)
-- Type: Microsoft.CognitiveServices/accounts
-- API version: 2026-05-15-preview
-- Kind: AIServices
-- SKU: S0
-- Identity: System-assigned
-- Features:
-  - Custom subdomain name
-  - Disabled public network access
-  - Network ACLs with Azure Services bypass
-
-AI Model Deployment
-- Type: Microsoft.CognitiveServices/accounts/deployments
-- API version: 2026-05-15-preview
-- SKU: Based on modelSkuName parameter, capacity set by modelCapacity
-- Model properties:
-  - Name: From modelName parameter
-  - Format: From modelFormat parameter
-  - Version: From modelVersion parameter
-
-Azure AI Search
-- Type: Microsoft.Search/searchServices
-- API version: 2024-06-01-preview
-- SKU: standard
-- Partition Count: 1
-- Replica Count: 1
-- Hosting Mode: default
-- Semantic Search: disabled
-- Features:
-  -  Disabled public network access
-  -  AAD auth with HTTP 401 challenge
-  -  System-assigned managed identity
-
-Storage Account
-- Type: Microsoft.Storage/storageAccounts
-- API version: 2023-05-0
-- Kind: StorageV2
-- SKU: ZRS or GRS (region dependent; use Standard_GRS if ZRS not available)
-- Features:
-  - Blob service, Queue service (if Azure Function Tool supported)
-  - Minimum TLS Version: 1.2
-  - Block public blob access
-  - Disabled public network access
-  - Force Azure AD authentication (SharedKey access disabled)
-
-Cosmos DB Account
-- Type: Microsoft.DocumentDB/databaseAccounts
-- API version: 2024-11-15
-- Kind: GlobalDocumentDB (SQL API)
-- Consistency Level: Session
-- Database Account Offer Type: Standard
-- Features:
-  - Disabled public network access
-  - Disabled local auth
-  - Single region deployment
-
-Azure Monitor (Application Insights & Log Analytics)
-- Log Analytics Workspace: Microsoft.OperationalInsights/workspaces
-  - SKU: PerGB2018
-  - Retention: 30 days
-- Application Insights: Microsoft.Insights/components
-  - Kind: web
-  - Linked to Log Analytics workspace
-  - Public ingestion disabled (reached privately via AMPLS)
-- Azure Monitor Private Link Scope (AMPLS): microsoft.insights/privateLinkScopes
-  - Access mode: PrivateOnly ingestion, Open query
-  - Scoped resources: Application Insights + Log Analytics
-  - Enables hosted agents to export telemetry via private network
-
-### Network Security Design
-This implementation utilizes a BYO VNet (Bring Your Own Virtual Network) approach, also known as custom VNet support with subnet delegation. Within your existing virtual network, one delegated subnet will be created.
-
-Network Security
-- Public network access disabled
-- Private endpoints for all services
-- Network ACLs with deny by default
-
-**Network Infrastructure**
-- A Virtual Network (192.168.0.0/16) is created (if existing isn't passed in)
-- Agent Subnet (192.168.0.0/24): Hosts Agent client
-- Private endpoint Subnet (192.168.1.0/24): Hosts private endpoints
-
-**Private Endpoints**
-Private endpoints ensure secure, internal-only connectivity. Private endpoints are created for the following:
-- Microsoft Foundry
-- Azure AI Search
-- Azure Storage
-- Azure Cosmos DB
-- Azure Monitor Private Link Scope (AMPLS) — enables telemetry export from hosted agents
-
-**Private DNS Zones**
-| Private Link Resource Type | Sub Resource | Private DNS Zone Name | Public DNS Zone Forwarders |
-|----------------------------|--------------|------------------------|-----------------------------|
-| **Microsoft Foundry**       | account      | `privatelink.cognitiveservices.azure.com`<br>`privatelink.openai.azure.com`<br>`privatelink.services.ai.azure.com` | `cognitiveservices.azure.com`<br>`openai.azure.com`<br>`services.ai.azure.com` |
-| **Azure AI Search**        | searchService| `privatelink.search.windows.net` | `search.windows.net` |
-| **Azure Cosmos DB**        | Sql          | `privatelink.documents.azure.com` | `documents.azure.com` |
-| **Azure Storage**          | blob         | `privatelink.blob.core.windows.net` | `blob.core.windows.net` |
-| **Azure Monitor (AMPLS)**  | azuremonitor | `privatelink.monitor.azure.com`<br>`privatelink.oms.opinsights.azure.com`<br>`privatelink.ods.opinsights.azure.com`<br>`privatelink.agentsvc.azure-automation.net` | `monitor.azure.com`<br>`oms.opinsights.azure.com`<br>`ods.opinsights.azure.com`<br>`agentsvc.azure-automation.net` |
-
-### Authentication & Authorization
-
-- **Managed Identity**
-  - Zero-trust security model
-  - No credential storage
-  - Platform-managed rotation
-
-  This template uses System Managed Identity, but User Assigned Managed Identity is also supported.
-
-- **Role Assignments**
-  - **Azure AI Search**
-    - Search Index Data Contributor (`8ebe5a00-799e-43f5-93ac-243d3dce84a7`)
-    - Search Service Contributor (`7ca78c08-252a-4471-8644-bb5ff32d4ba0`)
-  - **Azure Storage Account**
-    - Storage Blob Data Owner (`b7e6dc6d-f1e8-4753-8033-0f276bb0955b`)
-    - Storage Queue Data Contributor (`974c5e8b-45b9-4653-ba55-5f855dd0fb88`) (if Azure Function tool enabled)
-    - Two containers will automatically be provisioned during the project create capability host process:
-      - Azure Blob Storage Container: `<workspaceId>-azureml-blobstore`
-        - Storage Blob Data Contributor
-      - Azure Blob Storage Container: `<workspaceId>-agents-blobstore`
-        - Storage Blob Data Owner
-  - **Cosmos DB for NoSQL**
-    - Cosmos DB Operator (`230815da-be43-4aae-9cb4-875f7bd000aa`)
-    - Cosmos DB Built-in Data Contributor
-    - Three containers will automatically be provisioned during the create capability host process:
-      - Cosmos DB for NoSQL container: `<${projectWorkspaceId}>-thread-message-store`
-      - Cosmos DB for NoSQL container: `<${projectWorkspaceId}>-system-thread-message-store`
-      - Cosmos DB for NoSQL container: `<${projectWorkspaceId}>-agent-entity-store`
-
-
----
-
-## Module Structure
-
-```text
-modules-network-secured/
-├── ai-account-identity.bicep                       # Microsoft Foundry deployment and configuration (supports BYO existing account). Account caphost is implicit via networkInjections.scenario='agent'
-├── ai-project-identity.bicep                       # Foundry project + connections. Sets capabilitySettings so the project capability host is created implicitly
-├── ai-project-identity-unique.bicep                # add-project.bicep variant (unique connection names) — also sets capabilitySettings
-├── ai-existing-project-connections.bicep           # add-existing-project.bicep variant — upserts the existing project with capabilitySettings
-├── ai-search-role-assignments.bicep                # AI Search RBAC configuration
-├── application-insights.bicep                      # Workspace-based Application Insights for agent tracing
-├── azure-storage-account-role-assignments.bicep    # Storage Account RBAC configuration
-├── blob-storage-container-role-assignments.bicep   # Blob Storage Container RBAC configuration (off by default; implicit caphost provisions containers)
-├── cosmos-container-role-assignments.bicep         # CosmosDB container Account RBAC configuration (off by default; implicit caphost provisions containers)
-├── cosmosdb-account-role-assignment.bicep          # CosmosDB Account RBAC configuration
-├── existing-vnet.bicep                             # Bring your existing virtual network to template deployment
-├── format-project-workspace-id.bicep               # Formatting the project workspace ID
-├── monitor-private-link-scope.bicep                # Azure Monitor Private Link Scope (AMPLS) for private telemetry ingestion
-├── network-agent-vnet.bicep                        # Logic for routing virtual network set-up if existing virtual network is selected
-├── private-endpoint-and-dns.bicep                  # Creating virtual networks and DNS zones.
-├── standard-dependent-resources.bicep              # Deploying CosmosDB, Storage, and Search
-├── subnet.bicep                                    # Setting the subnet for Agent network injection
-├── validate-existing-resources.bicep               # Validate existing CosmosDB, Storage, and Search to template deployment
-└── vnet.bicep                                      # Deploying a new virtual network
-```
-
-> **Scenario 22 note:** `add-account-capability-host.bicep` and `add-project-capability-host.bicep` from template 15 are intentionally **absent** — both capability hosts are implicit (account via `networkInjections`, project via `capabilitySettings`).
-
-## Maintenance
-
-### Regular Tasks
-
-1. Review role assignments
-2. Monitor network security
-3. Check service health
-4. Update configurations as needed
-
-### Troubleshooting
-
-1. Verify private endpoint connectivity
-2. Check DNS resolution
-3. Validate role assignments
-4. Review network security groups
-
----
-# (Optional) Adding Multiple Projects to Foundry Deployment
-
-This guide explains how to add additional projects to your existing AI Foundry deployment with network security and capability hosts.
-
-## Overview
-
-After deploying your initial AI Foundry setup using `main.bicep`, you can add additional projects using the modular approach provided in this repository. Each new project will:
-
-- ✅ **Reuse existing shared infrastructure** (AI Services account, Storage, Cosmos DB, AI Search, VNet)
-- ✅ **Create independent projects** with unique identities and connections
-- ✅ **Set up proper role assignments** and capability hosts for each project
-- ✅ **Maintain network security** configurations from your original deployment
-- ✅ **Deploy independently** without affecting existing projects
-
-## Files Added
-
-### Core Deployment Files
-
-| File | Purpose |
-|------|---------|
-| `add-project.bicep` | Main Bicep template for adding new projects |
-| `add-project.bicepparam` | Parameters file template for new projects |
-| `modules-network-secured/ai-project-identity-unique.bicep` | Modified project module with unique connection names |
-| `modules-network-secured/blob-storage-container-role-assignments-unique.bicep` | Modified storage role assignment module |
-
-### Helper Files
-
-| File | Purpose |
-|------|---------|
-| `get-existing-resources.ps1` | PowerShell script to discover existing resource names |
-
-## Prerequisites
-
-1. ✅ **Existing AI Foundry deployment** completed using `main.bicep`
-2. ✅ **Azure CLI** installed and logged in
-3. ✅ **Proper permissions** on the resource group and existing resources
-4. ✅ **Resource names** from your existing deployment
-
-## Step-by-Step Guide
-
-### Step 1: Discover Existing Resource Names
-
-Run the PowerShell script to automatically discover your existing resource names:
+Example for the main entry point, from this folder:
 
 ```powershell
-# Navigate to your repository folder
-cd "path\to\your\AgentRepro\folder"
-
-# Run the discovery script
-.\get-existing-resources.ps1 -ResourceGroupName "your-resource-group-name"
-
-# Optional: Include subscription ID if needed
-.\get-existing-resources.ps1 -ResourceGroupName "your-resource-group-name" -SubscriptionId "your-subscription-id"
+az deployment group what-if --subscription '<subscription-id>' `
+  --resource-group '<resource-group>' --template-file main.bicep `
+  --parameters main.bicepparam
+az deployment group create --subscription '<subscription-id>' `
+  --resource-group '<resource-group>' --template-file main.bicep `
+  --parameters main.bicepparam
 ```
 
-**Example output:**
-```
-=== Summary for add-project.bicepparam ===
-param existingAccountName = 'aiservicesytlz'
-param existingAiSearchName = 'aiservicesytlzsearch'
-param existingStorageName = 'aiservicesytlzstorage'
-param existingCosmosDBName = 'aiservicesytlzcosmosdb'
-param accountResourceGroupName = 'agenticvnet'
-param aiSearchResourceGroupName = 'agenticvnet'
-param storageResourceGroupName = 'agenticvnet'
-param cosmosDBResourceGroupName = 'agenticvnet'
-```
+### Inspect the account, project, and both host scopes
 
-### Step 2: Configure Parameters File
-
-Copy the output from Step 1 and update your `add-project.bicepparam` file:
-
-### Step 3: Deploy the New Project
-
-Deploy using Azure CLI:
+Use the **actual deployed names**, including any generated suffix. The following commands are reads; the project host collection is distinct from the account host collection:
 
 ```powershell
-az deployment group create `
-  --resource-group "your-resource-group" `
-  --template-file "add-project.bicep" `
-  --parameters "add-project.bicepparam"
+$Sub = '<subscription-id>'; $RG = '<account-resource-group>'
+$Account = '<actual-account-name>'; $Project = '<actual-project-name>'
+$AccountId = "/subscriptions/$Sub/resourceGroups/$RG/providers/Microsoft.CognitiveServices/accounts/$Account"
+$A = "https://management.azure.com$AccountId"
+$P = "$A/projects/$Project"
+$Api = '2026-05-15-preview'; $HostApi = '2025-10-01-preview'
+az rest --method get --url "${A}?api-version=$Api" `
+  --query '{state:properties.provisioningState,injections:properties.networkInjections}'
+az rest --method get --url "${P}?api-version=$Api" `
+  --query '{state:properties.provisioningState,principalId:identity.principalId,settings:properties.capabilitySettings}'
+az rest --method get --url "$A/capabilityHosts?api-version=$HostApi"
+az rest --method get --url "$P/capabilityHosts?api-version=$HostApi"
 ```
 
-## Adding Multiple Projects
+Discover the Project host's returned name and GET that specific resource to inspect its bindings. Confirm terminal `Succeeded` state, the expected backing-store IDs, and the Account host's intended subnet. Use an API version exposing `properties.networkInjections`; an older portal/SDK projection may omit it. Host or connection existence does not establish role assignments. Complete the [runtime access checks](#after-provisioning-verify-runtime-access) before testing agents.
 
-To add additional projects, repeat the process with different parameter values:
+### Readiness checklist
 
-### For a Third Project:
+- Account, Project, and expected hosts are ready; `capabilitySettings` identifies the intended three stores.
+- Every new account has its own delegated subnet; private endpoints are approved; the client/runtime DNS and network path resolve/reach the correct private resources.
+- Managed/explicit connections point to the intended resources; do not assume requested connection names were adopted by an implicit host.
+- Provisioning caller permissions and Project MI runtime grants are both correct, including Cosmos SQL data roles and effective ABAC conditions.
+- The model deployment exists and the selected SDK/API/model combination works.
+- A data-plane CRUD/inference check succeeds from the private-connected client under the intended identity.
 
-1. **Update project-specific parameters:**
-   ```bicep
-   param projectName = 'thirdproject'  // Must be unique
-   param displayName = 'Third Project'
-   ```
+## Add a new project to the existing account
 
-3. **Deploy using the new parameters file:**
-   ```powershell
-   az deployment group create `
-     --resource-group "your-resource-group" `
-     --template-file "add-project.bicep" `
-     --parameters "add-project.bicepparam"
-   ```
+Use [add-project.bicep](add-project.bicep) with [add-project.bicepparam](add-project.bicepparam). Supply the actual existing account and store coordinates, the account's region, and the new project's display name/description. [get-existing-resources.ps1](get-existing-resources.ps1) can help discover shared resource names; verify the result rather than assuming every similarly named resource belongs to this environment.
 
-## What Gets Created
+- Deploy in the existing account's resource group/subscription. The [project module](modules-network-secured/ai-project-identity-unique.bicep) references the parent in `resourceGroup()`.
+- This path does not network-inject the parent account. Verify its existing network/host readiness first.
+- It uses a `deploymentTimestamp`-derived suffix. A rerun with a new timestamp can create another project; retain the timestamp for retries when you intend the same project.
+- The project module sets `capabilitySettings` but does not declare backing-store connection resources. `uniqueConnectionSuffix` is currently not consumed by resource declarations and does not control service-created connection names.
+- Storage Contributor, Cosmos Operator, and Search roles are unconditional **Bicep assignments** to the new Project MI. `assignContainerRoles=false` skips the extra Storage Owner/Cosmos SQL grants; supply them explicitly where needed. This path has no `assignProjectStorageAndCosmosAccountRoles` switch.
 
-Each new project deployment creates:
+Preview and deploy with the same commands above, substituting the new-project entry point and parameter file. Then perform the same host, RBAC, and private data-plane checks.
 
-| Resource | Description |
-|----------|-------------|
-| **AI Foundry Project** | New project under your existing AI Services account |
-| **Managed Identity** | Project-specific system-assigned identity |
-| **Unique Connections** | Project-specific connections to shared resources |
-| **Capability Host** | Created **implicitly** by AccountRP from the project's `capabilitySettings` |
-| **RBAC Assignments** | Proper permissions on shared resources |
+## Update an existing project in place
 
-### Role Assignments Created:
+Use [add-existing-project.bicep](add-existing-project.bicep) with [add-existing-project.bicepparam](add-existing-project.bicepparam) only after reviewing the current project and its managed/explicit connections.
 
-- ✅ **Storage Blob Data Contributor** on Storage Account
-- ✅ **Storage Blob Data Owner** on project-specific containers
-- ✅ **Cosmos DB Operator** on Cosmos DB Account
-- ✅ **Cosmos Built-In Data Contributor** on project-specific containers
-- ✅ **Search Index Data Contributor** on AI Search Service
-- ✅ **Search Service Contributor** on AI Search Service
+> [!WARNING]
+> This is a **Project PUT/upsert**, not a reference-only operation. The [existing-project module](modules-network-secured/ai-existing-project-connections.bicep) writes `location`, system-assigned identity, `displayName`, `description`, and `capabilitySettings`, then declares three AAD child connections. The template does not fetch and preserve metadata automatically. **`projectDescription` defaults to an empty string and clears an existing description if omitted.** Pass the current description explicitly when preserving it, along with the current region and display name.
 
-## Configuration Reference
+The path expects an existing network-injected parent and a named Project with its intended identity. It appends no suffix, but it does not provide a read-only existence guard: do not treat a misspelled project name as a safe no-op. Deploy in the parent account's resource group/subscription.
 
-### Required Parameters (Must Customize for Each Project)
+### Preserve metadata and review connection writes
 
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| `projectName` | Unique name for the project | `'secondproject'` |
-| `displayName` | Display name in Azure portal | `'Second Project'` |
-| `projectDescription` | Description of the project | `'My second AI project'` |
+Before updating, GET the Project and record its ID, identity, `location`, display name, description, `capabilitySettings`, connections, and host bindings. In the parameter file, explicitly supply:
 
-### Existing Resource Parameters (From Script)
+```bicep
+param projectName = 'your-existing-project-name'
+param location = 'your-project-region'
+param displayName = 'your-current-display-name'
+param projectDescription = 'your-current-description'
+```
 
-| Parameter | Description | Source |
-|-----------|-------------|---------|
-| `existingAccountName` | AI Services account name | Output from `get-existing-resources.ps1` |
-| `existingAiSearchName` | AI Search service name | Output from `get-existing-resources.ps1` |
-| `existingStorageName` | Storage account name | Output from `get-existing-resources.ps1` |
-| `existingCosmosDBName` | Cosmos DB account name | Output from `get-existing-resources.ps1` |
-| `*ResourceGroupName` | Resource group names | Usually same as deployment RG |
-| `*SubscriptionId` | Subscription IDs | Usually same subscription |
+The `cosmosDBConnectionName`, `azureStorageConnectionName`, and `aiSearchConnectionName` overrides select the names of **explicit connection PUTs**, defaulting to `<resourceName>-<lowercase-project-name>`. They do not pass a binding-name override to an explicit host module—there is no such module. Check the returned host bindings after deployment. Service-managed connections may reject direct modification; do not overwrite them, weaken checks, or assume the connection override migrates host bindings safely. Preserve failure evidence and use a supported lifecycle if the existing managed state is incompatible.
 
+### Existing-project role behavior
 
-## Security Considerations
+`assignRoles=true` is the default and runs **all five role modules**: Storage Contributor, Cosmos Operator, Search roles, Storage Owner, and Cosmos SQL data access. There is no separate `assignContainerRoles` switch in this entry point. These are template-created grants, not duplicates of grants the service would create.
 
-- ✅ **Least Privilege**: Each project gets only the permissions it needs
-- ✅ **Isolated Containers**: Projects get separate storage containers
-- ✅ **Network Security**: Inherits network security from original deployment
-- ✅ **Unique Identities**: Each project has its own managed identity
+Set `assignRoles=false` only after verifying the Project MI's required effective permissions or arranging an explicit separate grant step. It skips **all** those modules; it does not mean “keep the account grants but skip container grants.” Existing assignments created with different GUIDs/conditions can conflict with the template's deterministic names. Inspect and reconcile assignments through an authorized workflow; do not delete unrelated grants or repeatedly rerun a conflicting deployment.
 
-## Limitations
+Within the same entry point, fixed parameters produce deterministic names for the role resources, but that is not a blanket promise that a Project PUT, connection update, or host side effect is non-destructive. Preview, review existing state, and verify the result.
 
-- 📝 All projects share the same model deployments
-- 📝 Projects must be in the same region as the original deployment
-- 📝 Network configuration is inherited from original deployment
+## Module map
+
+| Source | Responsibility |
+| --- | --- |
+| [ai-account-identity.bicep](modules-network-secured/ai-account-identity.bicep) | New account network injection and optional model; reference-only existing-account branch |
+| [ai-project-identity.bicep](modules-network-secured/ai-project-identity.bicep) | Main Project PUT with backing-store IDs |
+| [ai-project-identity-unique.bicep](modules-network-secured/ai-project-identity-unique.bicep) | Additional Project PUT; no explicit backing-store connections |
+| [ai-existing-project-connections.bicep](modules-network-secured/ai-existing-project-connections.bicep) | Existing Project PUT plus explicit AAD connection writes |
+| [standard-dependent-resources.bicep](modules-network-secured/standard-dependent-resources.bicep) | Create/reference BYO data resources |
+| [network-agent-vnet.bicep](modules-network-secured/network-agent-vnet.bicep), [existing-vnet.bicep](modules-network-secured/existing-vnet.bicep), [vnet.bicep](modules-network-secured/vnet.bicep) | VNet/subnet creation or reuse |
+| [private-endpoint-and-dns.bicep](modules-network-secured/private-endpoint-and-dns.bicep) | Service private endpoints and DNS zone groups/links |
+| [validate-existing-resources.bicep](modules-network-secured/validate-existing-resources.bicep), [validate-search-aad-auth.bicep](modules-network-secured/validate-search-aad-auth.bicep) | BYO resource/DNS discovery and Search authentication checks |
+| [azure-storage-account-role-assignment.bicep](modules-network-secured/azure-storage-account-role-assignment.bicep), [cosmosdb-account-role-assignment.bicep](modules-network-secured/cosmosdb-account-role-assignment.bicep), [ai-search-role-assignments.bicep](modules-network-secured/ai-search-role-assignments.bicep) | Explicit Project MI account/service grants |
+| [blob-storage-container-role-assignments.bicep](modules-network-secured/blob-storage-container-role-assignments.bicep), [unique variant](modules-network-secured/blob-storage-container-role-assignments-unique.bicep), [cosmos-container-role-assignments.bicep](modules-network-secured/cosmos-container-role-assignments.bicep) | Explicit Storage account/ABAC and Cosmos SQL database grants |
+| [container-registry.bicep](modules-network-secured/container-registry.bicep) | Optional ACR, endpoint/DNS, and Project MI AcrPull |
+| [application-insights.bicep](modules-network-secured/application-insights.bicep), [monitor-private-link-scope.bicep](modules-network-secured/monitor-private-link-scope.bicep) | Optional tracing connection and private ingestion resources |
+
+## Troubleshooting and cleanup
+
+- **Provisioning authorization failure:** identify the actual ARM caller and the failed action/scope. A grant to the Project MI, or a user PIM activation, does not grant a different service principal permission.
+- **Runtime 403:** check the Project MI on the backing stores, the API caller on the Foundry project, Cosmos SQL roles, role propagation, and network policy separately. Do not assume the service will repair missing RBAC.
+- **Missing implicit host:** verify the parent account's network injection, exact project settings, and terminal provisioning errors. Reusing an uninjected account does not configure it.
+- **`RoleAssignmentExists`:** inspect exact principal, scope, role, condition, and assignment name. The existing-project all-or-none flag can skip template grants only when required access is supplied elsewhere.
+- **Private endpoint/DNS failure:** inspect approvals, VNet links/forwarders, private IP resolution, and routing from the client/runtime network. Preserve public-access restrictions.
+- **Description or connection unexpectedly changed:** inspect the supplied existing-project PUT parameters. Empty description is a write, not “preserve current value.”
+
+Delete only resources owned by your deployment after capturing diagnostics and obtaining the resource owner's approval. Project-only cleanup must not delete the shared parent Account host, stores, or subnet. For complete Account removal, follow the [documented delete/purge lifecycle](https://learn.microsoft.com/en-us/azure/ai-services/recover-purge-resources?tabs=azure-portal#purge-a-deleted-resource) and verify dependent host/network cleanup before reusing any subnet; elapsed time alone is not readiness. This template does not add role-revocation orchestration for grants on retained BYO resources—review their lifecycle separately.
+
+[createCapHost.sh](createCapHost.sh) and [deleteCapHost.sh](deleteCapHost.sh) are **manual Account-scoped** maintenance helpers, not steps in the implicit deployment and not Project host helpers. Their route has no `/projects/...` segment. Do not use them as an automatic repair path or to recreate a second Account host. Redeploying with a nonexistent `createAccountCapabilityHost` flag cannot restore a deleted host.
 
 ## References
 
-- [Microsoft Foundry Networking Documentation](https://learn.microsoft.com/en-us/azure/ai-foundry/how-to/configure-private-link?tabs=azure-portal&pivots=fdp-project)
-- [Microsoft Foundry RBAC Documentation](https://learn.microsoft.com/en-us/azure/ai-foundry/concepts/rbac-azure-ai-foundry?pivots=fdp-project)
-- [Private Endpoint Documentation](https://learn.microsoft.com/en-us/azure/private-link/)
-- [RBAC Documentation](https://learn.microsoft.com/en-us/azure/role-based-access-control/)
-- [Network Security Best Practices](https://learn.microsoft.com/en-us/azure/security/fundamentals/network-best-practices)
-
-# (Optional) Securing an Existing Project (Reuse In-Place)
-
-`add-project.bicep` always creates a brand new project and appends a short random
-suffix to keep the name unique. That is the right behavior when you want a fresh
-project, but it does not help when you already have a Foundry project in use and
-simply want to wire the network-secured agent setup onto it.
-
-`add-existing-project.bicep` covers that case. It reuses the project you name, in
-place, with no new project and no suffix. This is the common situation when you
-are securing an already-running Foundry deployment behind private endpoints and
-do not want to recreate projects or move agents.
-
-## When to use which
-
-| Goal | Template |
-|------|----------|
-| Add a new, separate project to an existing Foundry account | `add-project.bicep` |
-| Wire/secure the agent setup onto a project that already exists | `add-existing-project.bicep` |
-
-## What it does
-
-`add-existing-project.bicep` references the existing project with the `existing`
-keyword and then layers on the same building blocks the new-project flow uses:
-
-- ✅ **Adds the three agent connections** (Cosmos DB, Storage, AI Search) to the
-  existing project using AAD (Entra ID) auth, no keys.
-- ✅ **Assigns the required RBAC roles** to the project managed identity on the
-  shared Storage, Cosmos DB, and AI Search resources.
-- ✅ **Creates (or updates) the project capability host** bound to those exact
-  connection names.
-- ✅ **Assigns the container-scoped roles** for the project's storage and Cosmos
-  containers after the capability host exists.
-- ✅ **Reuses every shared module** from the new-project flow, so behavior stays
-  consistent between the two paths.
-
-It does **not** create the project, change its display name, or touch its
-description. Those stay exactly as they are.
-
-## Prerequisites
-
-1. ✅ **The project already exists** under the target AI Services (Foundry)
-   account, and the account is the network-secured account from your original
-   deployment.
-2. ✅ **The project has a system-assigned managed identity.** The connections and
-   role assignments target that identity.
-3. ✅ **Account-level network injection is already in place** (the agent subnet is
-   configured on the account capability host from the original `main.bicep`
-   deployment). Network security is account-scoped, so once the account is
-   injected, every project under it inherits agent-subnet security. You do not
-   re-run the full template per project.
-4. ✅ **AI Search allows AAD auth.** Foundry connects to Search with `authType=AAD`,
-   so the service must accept Microsoft Entra (AAD) data-plane tokens. A service is
-   ready when local auth is disabled (RBAC-only) or its `authOptions` includes an
-   `aadOrApiKey` block. The Azure default for a new Search service is API-keys-only,
-   which rejects AAD and makes agents fail with HTTP 403. This template now checks
-   the live state and stops the deployment early with the exact fix command if the
-   service is API-keys-only, so you will not get a silent broken connection. To
-   enable AAD up front:
-   ```bash
-   az search service update --name <search-name> --resource-group <search-rg> \
-     --subscription <search-sub> --auth-options aadOrApiKey \
-     --aad-auth-failure-mode http401WithBearerChallenge
-   ```
-5. ✅ **Run the deployment in the account's resource group.** Like
-   `add-project.bicep`, this template operates on the project and capability host
-   at the deployment resource group, so deploy into the resource group that holds
-   the Foundry account. The shared Storage, Cosmos DB, and AI Search resources can
-   live in other resource groups or subscriptions (set their RG and subscription
-   parameters accordingly).
-6. ✅ **Azure CLI** installed and logged in, with permission to create role
-   assignments and capability hosts on the target resources.
-7. ✅ **Cross-subscription resources stay in the same tenant.** If your Storage,
-   Cosmos DB, or AI Search resources live in other subscriptions, they must be
-   reachable by the deployment identity and in the same Microsoft Entra tenant as
-   the project managed identity, so the AAD connections and role assignments
-   resolve.
-
-## Step-by-step
-
-### Step 1: Configure the parameters file
-
-Edit `add-existing-project.bicepparam` and set `projectName` to the existing
-project, plus the names, resource groups, and subscription IDs of the shared
-resources from your original deployment. You can reuse `get-existing-resources.ps1`
-to discover the shared resource names.
-
-```bicep
-// EXISTING project to reuse in place (no suffix is appended)
-param projectName = 'your-existing-project-name'
-// Scenario 22: capabilitySettings is applied via a project upsert, so pass the
-// project's CURRENT region and display name so nothing is changed.
-param location = 'your-project-region'
-param displayName = 'your-existing-project-display-name'
-
-param existingAccountName = 'your-foundry-account'
-param accountResourceGroupName = 'your-resource-group'
-param accountSubscriptionId = 'your-subscription-id'
-// ... plus existingAiSearchName / existingStorageName / existingCosmosDBName
-//     and their resource groups and subscription IDs
-```
-
-### Step 2: Preview the change
-
-Run a what-if first so you can see exactly what will be added before anything is
-deployed:
-
-```powershell
-az deployment group what-if `
-  --resource-group "your-resource-group" `
-  --template-file "add-existing-project.bicep" `
-  --parameters "add-existing-project.bicepparam"
-```
-
-### Step 3: Deploy
-
-```powershell
-az deployment group create `
-  --resource-group "your-resource-group" `
-  --template-file "add-existing-project.bicep" `
-  --parameters "add-existing-project.bicepparam"
-```
-
-## Handling already-configured projects
-
-Production projects are rarely a blank slate. The template has a few optional
-parameters so you can point it at a project that already has some of this wiring
-in place. Review the project's current connections, capability host, and role
-assignments before you run, then set these as needed:
-
-- **`assignRoles`** (default `true`). Set to `false` to skip every
-  role-assignment module. Use this when the project identity is already
-  permissioned on Storage, Cosmos DB, and AI Search. Manual or earlier
-  assignments use different assignment names, and Azure rejects a duplicate on
-  the same identity, role, and scope with `RoleAssignmentExists`. Skipping the
-  modules avoids that conflict. Do not set `assignRoles = false` unless every
-  role in the checklist below already exists for the project managed identity.
-  When a required role is missing, the deployment still succeeds, but the agent
-  fails at runtime rather than at deploy time, which is harder to diagnose.
-- **`cosmosDBConnectionName` / `azureStorageConnectionName` /
-  `aiSearchConnectionName`** (default empty). Leave empty to use the
-  deterministic default `<resourceName>-<project>`. Set them to the exact
-  connection names a pre-existing capability host already binds to, so the
-  capability host keeps pointing at the same connections. Note that if a
-  connection with the supplied (or default) name already exists, this deployment
-  updates that connection to target the Storage, Cosmos DB, and AI Search
-  resources you pass in. Do not reuse a live connection name unless it already
-  targets the resources you intend.
-- **`location` / `displayName`** (scenario 22, required). capabilitySettings is
-  applied via a project upsert, so pass the project's CURRENT region and display
-  name to avoid changing them. The project capability host is then created
-  **implicitly** by AccountRP from those capabilitySettings — there is no
-  `projectCapHost` name to set.
-
-### Required roles when you skip role assignment
-
-If you set `assignRoles = false`, confirm the project managed identity already
-holds these roles before you run, or the agent will fail at runtime:
-
-| Resource | Role | Scope |
-|----------|------|-------|
-| Storage account | Storage Blob Data Contributor | Storage account |
-| Storage account | Storage Blob Data Owner (ABAC-conditioned to `*-azureml-agent` containers) | Storage account |
-| Cosmos DB account | Cosmos DB Operator | Cosmos DB account |
-| Cosmos DB data plane | Cosmos DB Built-in Data Contributor | `enterprise_memory` database |
-| AI Search | Search Index Data Contributor | AI Search service |
-| AI Search | Search Service Contributor | AI Search service |
-
-## Idempotency
-
-The template is safe to re-run. Connection names and role-assignment IDs are
-derived deterministically from the project name, so a second run converges on the
-same resources instead of creating duplicates.
-
-## Scope and caveats
-
-This template targets the retrofit case: wiring the agent setup onto a project
-that already exists. Keep these points in mind:
-
-- 📝 A deployment that fails partway can leave the project partly wired (some
-  connections or roles present, the capability host not yet created). Re-running
-  after you fix the cause converges the rest, because every step is
-  deterministic and idempotent.
-- 📝 The three connections are created (or updated) with names derived from the
-  shared resource names plus the project name, unless you override them. If the
-  project already has connections created another way (for example through the
-  portal, which sanitizes and suffixes names), pass the override parameters so
-  the capability host binds to the names that already exist instead of adding new
-  ones.
-- 📝 The project capability host is created **implicitly** by AccountRP from the
-  project's `capabilitySettings`. There is no explicit capability-host resource
-  or `projectCapHost` name in this scenario.
-- 📝 Network injection is account-scoped, not project-scoped. Once the account
-  capability host has the agent subnet (from the original `main.bicep`
-  deployment), every project under that account inherits agent-subnet security.
-  You run this lighter template per project, not the full setup.
+- [Scenario 22 provisioning and networking diagrams](diagrams/README.md)
+- [Foundry private networking](https://learn.microsoft.com/en-us/azure/ai-foundry/how-to/configure-private-link?tabs=azure-portal&pivots=fdp-project)
+- [Foundry RBAC](https://learn.microsoft.com/en-us/azure/ai-foundry/concepts/rbac-azure-ai-foundry?pivots=fdp-project)
+- [Azure RBAC](https://learn.microsoft.com/en-us/azure/role-based-access-control/)
+- [Azure Private Link](https://learn.microsoft.com/en-us/azure/private-link/)

@@ -24,7 +24,9 @@ resource storageBlobDataOwner 'Microsoft.Authorization/roleDefinitions@2022-04-0
 
 var conditionStr= '((!(ActionMatches{\'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/tags/read\'})  AND  !(ActionMatches{\'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/filter/action\'}) AND  !(ActionMatches{\'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/tags/write\'}) ) OR (@Resource[Microsoft.Storage/storageAccounts/blobServices/containers:name] StringStartsWithIgnoreCase \'${workspaceId}\' AND @Resource[Microsoft.Storage/storageAccounts/blobServices/containers:name] StringLikeIgnoreCase \'*-azureml-agent\'))'
 
-// Assign Storage Blob Data Owner role with unique name
+// Explicit assignment at Storage ACCOUNT scope, not a container resource scope.
+// The ABAC expression constrains selected tag/filter actions, not every role action.
+// This module grants permissions; it does not create any containers.
 resource storageBlobDataOwnerAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: storage
   name: guid(storageBlobDataOwner.id, storage.id, aiProjectPrincipalId, uniqueSuffix)

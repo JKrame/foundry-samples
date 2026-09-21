@@ -10,12 +10,12 @@ param networkInjection string = 'true'
 
 // True BYO Foundry account.
 // When existingAccountResourceId is set, reference the existing AI Foundry
-// (Cognitive Services AIServices kind) account instead of creating a new one
-// with a deterministic suffix (which orphans on re-runs and collides on conflict).
-@description('Optional. Full ARM resource ID of an existing AI Foundry (CognitiveServices/accounts kind=AIServices) account to reuse. When set, the template will NOT create a new account.')
+// (Cognitive Services AIServices kind) account without updating its networking.
+// Existing accounts must already have the required injection, host and models.
+@description('Optional existing Foundry AIServices account ID. Reference-only: does not configure network injection, repair a capability host, or create a model deployment.')
 param existingAccountResourceId string = ''
 
-@description('Optional. When true, skip the model deployment. Recommended when reusing an existing account that already has the required model deployments.')
+@description('Skip model deployment for a new account when true. Existing accounts never receive a model deployment through this module, regardless of this flag.')
 param skipModelDeployment bool = false
 
 var useExistingAccount = !empty(existingAccountResourceId)

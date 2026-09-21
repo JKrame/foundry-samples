@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "16736530510756265113"
+      "templateHash": "13431389256479974456"
     }
   },
   "parameters": {
@@ -181,14 +181,14 @@
       "type": "string",
       "defaultValue": "",
       "metadata": {
-        "description": "Optional. Full ARM resource ID of an existing AI Foundry (CognitiveServices/accounts kind=AIServices) account to reuse. When set, the template will NOT create a new account."
+        "description": "Optional existing Foundry AIServices account ID. Reference-only: does not configure network injection, repair the account capability host, or deploy a model. Verify the existing account is already network injected and ready; deploy the project in the account resource group/subscription."
       }
     },
     "skipModelDeployment": {
       "type": "bool",
       "defaultValue": false,
       "metadata": {
-        "description": "Optional. When true, skip the model deployment. Recommended when reusing an existing account that already has the required model deployments."
+        "description": "Skip model deployment for a new account when true. The existing-account branch never creates a model, regardless of this flag; required model deployments must already exist there."
       }
     },
     "enableContainerRegistry": {
@@ -293,7 +293,7 @@
       "type": "bool",
       "defaultValue": false,
       "metadata": {
-        "description": "Assign the container-scoped data-plane roles (Storage Blob Data Owner on the agent blob containers, Cosmos Built-in Data Contributor on the thread containers). Leave false: the implicit capability host provisions these containers and their role assignments during create. Set true only if you must pre-assign them and the containers already exist."
+        "description": "Deploy explicit Project MI data-plane grants: Storage Blob Data Owner at storage-account scope with the module ABAC condition, and Cosmos DB Built-in Data Contributor on the enterprise_memory database. Default false skips these modules; an authorized operator must supply any missing runtime grants. The service does not create RBAC assignments."
       }
     }
   },
@@ -1042,7 +1042,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "11735265344310919806"
+              "templateHash": "583904143175716165"
             }
           },
           "parameters": {
@@ -1078,14 +1078,14 @@
               "type": "string",
               "defaultValue": "",
               "metadata": {
-                "description": "Optional. Full ARM resource ID of an existing AI Foundry (CognitiveServices/accounts kind=AIServices) account to reuse. When set, the template will NOT create a new account."
+                "description": "Optional existing Foundry AIServices account ID. Reference-only: does not configure network injection, repair a capability host, or create a model deployment."
               }
             },
             "skipModelDeployment": {
               "type": "bool",
               "defaultValue": false,
               "metadata": {
-                "description": "Optional. When true, skip the model deployment. Recommended when reusing an existing account that already has the required model deployments."
+                "description": "Skip model deployment for a new account when true. Existing accounts never receive a model deployment through this module, regardless of this flag."
               }
             }
           },
@@ -3379,20 +3379,20 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "11120438127573246982"
+              "templateHash": "16880825944487639035"
             }
           },
           "parameters": {
             "cosmosAccountName": {
               "type": "string",
               "metadata": {
-                "description": "Name of the AI Search resource"
+                "description": "Name of the Cosmos DB account"
               }
             },
             "projectPrincipalId": {
               "type": "string",
               "metadata": {
-                "description": "Project name"
+                "description": "Principal ID of the Project managed identity"
               }
             },
             "projectWorkspaceId": {

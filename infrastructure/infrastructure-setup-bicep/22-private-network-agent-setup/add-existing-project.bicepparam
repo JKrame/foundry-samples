@@ -6,19 +6,22 @@ param projectName = 'your-existing-project-name'
 // Scenario 22: capabilitySettings is applied via a project upsert, so the
 // existing project's region and current display name/description must be passed
 // through (set these to the project's CURRENT values so nothing is changed).
+// WARNING: omitting projectDescription clears an existing description to ''.
 param location = 'westus'
 param displayName = 'your-existing-project-display-name'
-// param projectDescription = ''
+// param projectDescription = 'your-current-description'
 
 // Set false to skip every role-assignment module. Use this only when the project
 // identity is ALREADY permissioned on Storage, Cosmos DB, and AI Search (for
 // example a production project whose roles were granted earlier under different
 // assignment names), to avoid a RoleAssignmentExists conflict.
+// Default true includes both account/service and extra data-plane grants. This
+// entry point has no assignContainerRoles switch. The service creates no RBAC.
 // param assignRoles = true
 
-// Optional. Override the connection names the capability host binds to. Leave
-// empty (the default) to use <resourceName>-<project>. Set these to match
-// connections that a pre-existing capability host already references.
+// Names for explicit connection PUTs, not overrides of implicit host bindings.
+// Empty defaults to <resourceName>-<project>; inspect managed connections and
+// verify the returned host bindings before attempting any migration.
 // param cosmosDBConnectionName = ''
 // param azureStorageConnectionName = ''
 // param aiSearchConnectionName = ''

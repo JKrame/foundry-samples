@@ -44,10 +44,10 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2026-05-15-previ
   properties: {
     description: projectDescription
     displayName: displayName
-    // Scenario 22: declaring capabilitySettings (the BYO store ARM resource IDs)
-    // makes AccountRP auto-provision the project's connections and its capability
-    // host implicitly. This template therefore declares NO explicit
-    // Microsoft.CognitiveServices/accounts/projects/capabilityHosts resource.
+    // Scenario 22: the parent account's network injection enables implicit host
+    // provisioning. capabilitySettings selects BYO stores for its managed connections
+    // and containers; it is not an RBAC grant or a trigger without network injection.
+    // No explicit Project CapabilityHost or backing-store connections are declared.
     // documentStore -> thread storage (Cosmos DB), vectorStore -> AI Search,
     // blobStore -> Storage account.
     // Bicep type defs for projects@2026-05-15-preview do not yet model
@@ -69,7 +69,7 @@ output projectPrincipalId string = project.identity.principalId
 #disable-next-line BCP053
 output projectWorkspaceId string = project.properties.internalId
 
-// return the BYO connection names
+// Backing-resource names for compatibility, not discovery of implicit host bindings.
 output cosmosDBConnection string = cosmosDBName
 output azureStorageConnection string = azureStorageName
 output aiSearchConnection string = aiSearchName
