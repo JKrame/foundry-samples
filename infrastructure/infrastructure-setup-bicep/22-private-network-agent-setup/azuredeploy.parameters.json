@@ -59,6 +59,9 @@
     "assignProjectStorageAndCosmosAccountRoles": {
       "value": true
     },
+    "assignContainerRoles": {
+      "value": true
+    },
     "dnsZonesSubscriptionId": {
       "value": ""
     },

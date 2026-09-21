@@ -21,8 +21,8 @@ param displayName string
 
 // The existing account must already be network injected. Project capabilitySettings
 // selects BYO stores for implicit provisioning; it does not grant any permissions.
-@description('Deploy explicit Project MI Storage Blob Data Owner (storage-account scope with ABAC) and Cosmos DB Built-in Data Contributor (enterprise_memory database scope) grants. Default false skips these modules; supply missing runtime grants separately. The service does not create RBAC assignments.')
-param assignContainerRoles bool = false
+@description('Deploy Project MI Storage Blob Data Owner (storage-account scope with ABAC) and Cosmos DB Built-in Data Contributor (enterprise_memory database scope) grants by default. Set false only when equivalent runtime grants are explicitly managed outside this deployment. The service does not create RBAC assignments.')
+param assignContainerRoles bool = true
 
 // Existing shared resources (from your original deployment)
 @description('Name of the existing AI Search service')
@@ -149,9 +149,9 @@ module aiSearchRoleAssignments 'modules-network-secured/ai-search-role-assignmen
 // prerequisite. Role modules depend on the Project MI output, not a host resource,
 // so they do not supply caller access before the Project PUT or a host-ready barrier.
 
-// Optional explicit runtime grants: Storage account/ABAC and Cosmos database scope.
-// The service provisions no RBAC. With these modules disabled, an authorized
-// operator must supply any missing grants before data-plane use.
+// Bicep deploys runtime grants by default: Storage account/ABAC and Cosmos database
+// scope. These modules do not pre-create containers. The service provisions no RBAC;
+// disable the modules only when equivalent grants are explicitly managed elsewhere.
 module storageContainersRoleAssignment 'modules-network-secured/blob-storage-container-role-assignments-unique.bicep' = if (assignContainerRoles) {
   name: 'storage-containers-${uniqueSuffix}-deployment'
   scope: resourceGroup(storageSubscriptionId, storageResourceGroupName)

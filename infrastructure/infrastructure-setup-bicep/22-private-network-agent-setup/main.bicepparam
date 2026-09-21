@@ -30,10 +30,10 @@ param createDependentResourcePrivateEndpoints = true
 // grant them after provisioning. The service does not create any RBAC.
 param assignProjectStorageAndCosmosAccountRoles = true
 
-// Extra runtime grants default OFF in main.bicep (Storage Owner with account-scope
-// ABAC and Cosmos SQL Data Contributor on enterprise_memory). An operator must
-// supply missing grants, or deliberately enable these modules after reviewing scope.
-// param assignContainerRoles = true
+// Bicep creates the Project MI runtime grants: Storage Owner with account-scope
+// ABAC and Cosmos SQL Data Contributor on enterprise_memory. The service never
+// creates these assignments. Set false only when equivalent grants are managed elsewhere.
+param assignContainerRoles = true
 
 // Subscription ID where DNS zones are located (leave empty to use deployment subscription)
 // ⚠️ If set to a different subscription, ALL zones below MUST have resource groups specified

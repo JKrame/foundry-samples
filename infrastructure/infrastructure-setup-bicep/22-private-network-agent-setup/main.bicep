@@ -234,8 +234,8 @@ var resolvedDnsZonesSubscriptionId = empty(normalizedDnsZonesSubscriptionId) ? s
 // the project's capabilitySettings selects its BYO stores. No projectCapHost name
 // or explicit host module is declared. The service does not create RBAC assignments.
 
-@description('Deploy explicit Project MI data-plane grants: Storage Blob Data Owner at storage-account scope with the module ABAC condition, and Cosmos DB Built-in Data Contributor on the enterprise_memory database. Default false skips these modules; an authorized operator must supply any missing runtime grants. The service does not create RBAC assignments.')
-param assignContainerRoles bool = false
+@description('Deploy Project MI runtime grants by default: Storage Blob Data Owner at storage-account scope with the module ABAC condition, and Cosmos DB Built-in Data Contributor on the enterprise_memory database. Set false only when equivalent runtime grants are explicitly managed outside this deployment. The service does not create RBAC assignments.')
+param assignContainerRoles bool = true
 
 // Create Virtual Network and Subnets
 module vnet 'modules-network-secured/network-agent-vnet.bicep' = {
@@ -524,9 +524,9 @@ module aiSearchRoleAssignments 'modules-network-secured/ai-search-role-assignmen
 // Caller provisioning permissions must already exist; disabled modules leave
 // their runtime grants to an authorized operator. File order is not a host barrier.
 
-// Optional explicit data-plane roles, disabled by default. Storage uses account
-// scope with an ABAC condition; Cosmos uses database scope. Container creation by
-// an implicit host does not grant data access. Review existing grants before enabling.
+// Bicep deploys these runtime grants by default. Storage uses account scope with
+// an ABAC condition; Cosmos uses database scope. The modules do not pre-create
+// containers, and implicit container creation never supplies role assignments.
 module storageContainersRoleAssignment 'modules-network-secured/blob-storage-container-role-assignments.bicep' = if (assignContainerRoles) {
   name: 'storage-containers-ra-${uniqueSuffix}-deployment'
   scope: resourceGroup(azureStorageSubscriptionId, azureStorageResourceGroupName)

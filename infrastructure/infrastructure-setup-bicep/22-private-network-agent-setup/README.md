@@ -15,7 +15,7 @@ languages:
 **Scenario 22** uses a network-injected Foundry account and project `capabilitySettings` to select BYO Storage, Cosmos DB, and AI Search resources. The templates do not declare account or project CapabilityHost resources.
 
 > [!IMPORTANT]
-> **Implicit capability-host provisioning does not provision any RBAC.** The service does not create Azure role assignments or Cosmos DB SQL data-plane role assignments. Enabled Bicep role-assignment modules create grants under the deployment identity; an authorized operator must supply any grants that those modules skip. Creating hosts, connections, or containers does not grant access to them.
+> **Implicit capability-host provisioning does not provision any RBAC.** The service does not create Azure role assignments or Cosmos DB SQL data-plane role assignments. **Bicep creates the Project managed identity's runtime grants by default**, under the deployment identity. Disabling a role module requires equivalent permissions to be explicitly managed elsewhere; there is no service-created fallback. Creating hosts, connections, or containers does not grant access to them.
 
 > [!NOTE]
 > **Network injection is the prerequisite for the implicit-host flow, not `capabilitySettings` alone.** A new account receives `properties.networkInjections` with `scenario: 'agent'`, its dedicated subnet ID, and `useMicrosoftManagedNetwork: false`. A project's `capabilitySettings` supplies the three backing-store ARM IDs. See the [account declaration](modules-network-secured/ai-account-identity.bicep#L27-L57) and [project declaration](modules-network-secured/ai-project-identity.bicep).
@@ -28,13 +28,13 @@ languages:
 | Add a new project to an already network-injected account | [add-project.bicep](add-project.bicep) | New project with a timestamp-derived suffix; enabled Project managed-identity grants; no account network update |
 | Update a named existing project in place | [add-existing-project.bicep](add-existing-project.bicep) | Project **PUT**, explicit connection writes, and optional RBAC modules; no account network update |
 
-For all three paths, follow [Provisioning and runtime RBAC](#provisioning-and-runtime-rbac) before using the data plane. The entry points have **different RBAC switches and defaults**; do not assume the main-template flags apply to the other two.
+For all three paths, follow [Provisioning and runtime RBAC](#provisioning-and-runtime-rbac) before using the data plane. Role modules are **enabled by default**, but the entry points have **different RBAC switches**; do not assume the main-template flags apply to the other two.
 
 ### How this differs from Scenario 15
 
 - Account and project hosts are implicit; there is no `createAccountCapabilityHost` parameter or explicit host module. The account must already be network injected when an existing account is reused.
 - Project `capabilitySettings` contains `documentStore`, `vectorStore`, and `blobStore` resource IDs. The [main project module](modules-network-secured/ai-project-identity.bicep) and [new-project module](modules-network-secured/ai-project-identity-unique.bicep) do not declare the three backing-store connections themselves. The [existing-project module](modules-network-secured/ai-existing-project-connections.bicep) **does** declare explicit child connections in addition to its project PUT.
-- Main and new-project deployments default `assignContainerRoles` to `false`. This disables their explicit extra data-plane grants; **it is not a request for the service to create the grants instead**.
+- Container creation and role assignment are separate responsibilities. Implicit provisioning creates the backing containers; [main](main.bicep#L237-L238) and [new-project](add-project.bicep#L24-L25) deployments default `assignContainerRoles` to `true` so **Bicep** creates the Storage/Cosmos runtime grants. The role modules do not pre-create containers.
 
 For other deployment models, see [Scenario 15](../15-private-network-standard-agent-setup/), [Scenario 17 for user-assigned identity](../17-private-network-standard-user-assigned-identity-agent-setup/), or [Scenario 19 for tools behind a VNet](../19-private-network-agent-tools/). Scenario 22 does not configure private tool traffic for MCP, OpenAPI, Functions, or A2A.
 
@@ -88,14 +88,14 @@ All grants in this table target the **Project MI**. “Enabled” means **ARM de
 | Storage Blob Data Contributor, Storage **account** | `assignProjectStorageAndCosmosAccountRoles` (default `true`) | Always | `assignRoles` (default `true`) | [Storage account role](modules-network-secured/azure-storage-account-role-assignment.bicep) |
 | Cosmos DB Operator, Cosmos **account** | Same flag | Always | `assignRoles` | [Cosmos account role](modules-network-secured/cosmosdb-account-role-assignment.bicep) |
 | Search Index Data Contributor and Search Service Contributor, Search **service** | Always | Always | `assignRoles` | [Search roles](modules-network-secured/ai-search-role-assignments.bicep) |
-| Storage Blob Data Owner, Storage **account**, with the module's ABAC condition | `assignContainerRoles` (default `false`) | `assignContainerRoles` (default `false`) | `assignRoles` (default `true`) | [Main variant](modules-network-secured/blob-storage-container-role-assignments.bicep), [additional/existing-project variant](modules-network-secured/blob-storage-container-role-assignments-unique.bicep) |
+| Storage Blob Data Owner, Storage **account**, with the module's ABAC condition | `assignContainerRoles` (default `true`) | `assignContainerRoles` (default `true`) | `assignRoles` (default `true`) | [Main variant](modules-network-secured/blob-storage-container-role-assignments.bicep), [additional/existing-project variant](modules-network-secured/blob-storage-container-role-assignments-unique.bicep) |
 | Cosmos DB Built-in Data Contributor, SQL data plane, **`enterprise_memory` database** | `assignContainerRoles` | `assignContainerRoles` | `assignRoles` | [Cosmos SQL role](modules-network-secured/cosmos-container-role-assignments.bicep) |
 | AcrPull, optional ACR **registry** | `enableContainerRegistry` (default `true`) | Not declared | Not declared | [Registry role](modules-network-secured/container-registry.bicep) |
 
 The flags are declared in [main.bicep](main.bicep), [add-project.bicep](add-project.bicep), and [add-existing-project.bicep](add-existing-project.bicep).
 
 > [!WARNING]
-> A default main/new-project deployment leaves `assignContainerRoles=false`. It therefore omits the Blob Data Owner and Cosmos SQL data-role modules. An operator must supply any missing runtime grants, or deliberately enable the template modules after reviewing their scopes and existing assignments. **A successful Project/CapabilityHost provisioning state is not proof that runtime RBAC is complete.** Do not skip these grants on the assumption that an implicit host will create them later.
+> Keep `assignContainerRoles=true` for the normal main/new-project deployment. Set it to `false` only when equivalent runtime permissions already exist or an authorized external workflow explicitly supplies them before use. This opt-out does not ask the service to create assignments. Review existing role names/conditions before redeploying to avoid conflicts. **A successful Project/CapabilityHost provisioning state is not proof that runtime RBAC is complete**; verify the Bicep role deployments and allow permission propagation.
 
 Despite their filenames and the `assignContainerRoles` flag, these modules do **not** all assign roles at individual container scope. The Storage Owner role is account-scoped; its existing ABAC expression constrains selected blob-tag/filter actions, not every action in that role. The Cosmos SQL role is database-scoped. Neither should be described as universal per-project container isolation. Review the linked modules and your access policy rather than assuming the names imply narrower permissions.
 
@@ -137,7 +137,7 @@ Use [main.bicepparam](main.bicepparam) as a starting point and review [main.bice
 | `azureCosmosDBAccountResourceId` | Empty | Full ARM ID of existing Cosmos DB; otherwise create one |
 | `createDependentResourcePrivateEndpoints` | `true` | Set false only if the BYO stores already have reachable private endpoints; the Foundry endpoint is still created |
 | `assignProjectStorageAndCosmosAccountRoles` | `true` | Controls only Project MI Storage Contributor and Cosmos Operator modules |
-| `assignContainerRoles` | `false` | Controls explicit extra Storage/Cosmos data-plane role modules; no service-created RBAC fallback |
+| `assignContainerRoles` | `true` | Bicep creates Storage Owner/Cosmos SQL runtime grants; opt out only for equivalent externally managed grants |
 | `dnsZonesSubscriptionId` / `existingDnsZones` | Current subscription / empty map values | Controls reuse of service private DNS zones |
 | `enableContainerRegistry` / `developerIpCidr` | `true` / empty | Optional Premium ACR + private endpoint + Project MI AcrPull. A supplied CIDR enables ACR public access with an allowlist. |
 | `enableTracing` / `monitorLocation` | `true` / `eastus2` | Optional Log Analytics, Application Insights, and AMPLS stack |
@@ -229,7 +229,7 @@ Use [add-project.bicep](add-project.bicep) with [add-project.bicepparam](add-pro
 - This path does not network-inject the parent account. Verify its existing network/host readiness first.
 - It uses a `deploymentTimestamp`-derived suffix. A rerun with a new timestamp can create another project; retain the timestamp for retries when you intend the same project.
 - The project module sets `capabilitySettings` but does not declare backing-store connection resources. `uniqueConnectionSuffix` is currently not consumed by resource declarations and does not control service-created connection names.
-- Storage Contributor, Cosmos Operator, and Search roles are unconditional **Bicep assignments** to the new Project MI. `assignContainerRoles=false` skips the extra Storage Owner/Cosmos SQL grants; supply them explicitly where needed. This path has no `assignProjectStorageAndCosmosAccountRoles` switch.
+- Storage Contributor, Cosmos Operator, and Search roles are unconditional **Bicep assignments** to the new Project MI. `assignContainerRoles=true` also deploys the Storage Owner/Cosmos SQL runtime grants by default. Set it to `false` only for equivalent externally managed grants. This path has no `assignProjectStorageAndCosmosAccountRoles` switch.
 
 Preview and deploy with the same commands above, substituting the new-project entry point and parameter file. Then perform the same host, RBAC, and private data-plane checks.
 
@@ -262,6 +262,12 @@ The `cosmosDBConnectionName`, `azureStorageConnectionName`, and `aiSearchConnect
 Set `assignRoles=false` only after verifying the Project MI's required effective permissions or arranging an explicit separate grant step. It skips **all** those modules; it does not mean “keep the account grants but skip container grants.” Existing assignments created with different GUIDs/conditions can conflict with the template's deterministic names. Inspect and reconcile assignments through an authorized workflow; do not delete unrelated grants or repeatedly rerun a conflicting deployment.
 
 Within the same entry point, fixed parameters produce deterministic names for the role resources, but that is not a blanket promise that a Project PUT, connection update, or host side effect is non-destructive. Preview, review existing state, and verify the result.
+
+## Offline validation
+
+[The RBAC contract tests](tests/test_role_assignments.py) compile all three entry points and sample parameter files. They verify that runtime grants are enabled by default, target the Project identity at the existing Storage account/Cosmos database scopes, retain the explicit opt-out conditions, and do not pre-create hosts or backing containers. They also check the generated portal artifacts against the Bicep sources.
+
+Run `python tests/test_role_assignments.py` from this folder with Python and Bicep CLI installed. Set `BICEP_CLI` to the executable path if it is not on `PATH` or in the Azure CLI installation directory. These tests do not authenticate, deploy resources, grant roles, or prove live RBAC propagation/data-plane readiness.
 
 ## Module map
 

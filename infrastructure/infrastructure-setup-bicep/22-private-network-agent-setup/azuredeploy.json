@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "13431389256479974456"
+      "templateHash": "13676897539791852481"
     }
   },
   "parameters": {
@@ -291,9 +291,9 @@
     },
     "assignContainerRoles": {
       "type": "bool",
-      "defaultValue": false,
+      "defaultValue": true,
       "metadata": {
-        "description": "Deploy explicit Project MI data-plane grants: Storage Blob Data Owner at storage-account scope with the module ABAC condition, and Cosmos DB Built-in Data Contributor on the enterprise_memory database. Default false skips these modules; an authorized operator must supply any missing runtime grants. The service does not create RBAC assignments."
+        "description": "Deploy Project MI runtime grants by default: Storage Blob Data Owner at storage-account scope with the module ABAC condition, and Cosmos DB Built-in Data Contributor on the enterprise_memory database. Set false only when equivalent runtime grants are explicitly managed outside this deployment. The service does not create RBAC assignments."
       }
     }
   },
