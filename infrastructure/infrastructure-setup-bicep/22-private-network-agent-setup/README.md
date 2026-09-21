@@ -112,15 +112,6 @@ The role modules reference the project principal/internal ID, so they depend on 
 
 See the [Foundry RBAC guidance](https://learn.microsoft.com/en-us/azure/ai-foundry/concepts/rbac-azure-ai-foundry?pivots=fdp-project) and [Cosmos DB data-plane RBAC guidance](https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/security/how-to-grant-data-plane-access).
 
-## Deployment flow and architecture
-
-The [Scenario 22 diagrams](diagrams/README.md) show:
-
-1. Deployment/caller responsibilities versus implicit host/resource provisioning.
-2. Private-network access and Project identity usage.
-
-They replace the copied Scenario 15 images, which showed explicit host modules and a connection/role ordering that does not represent this template. Diagram arrows describe responsibilities and logical flow, not a promise that Bicep schedules modules in file order.
-
 ## Main-template configuration
 
 Use [main.bicepparam](main.bicepparam) as a starting point and review [main.bicep](main.bicep) for the complete parameter definitions. The values below are **template defaults**; the sample parameter file overrides some of them.
@@ -304,7 +295,6 @@ Delete only resources owned by your deployment after capturing diagnostics and o
 
 ## References
 
-- [Scenario 22 provisioning and networking diagrams](diagrams/README.md)
 - [Foundry private networking](https://learn.microsoft.com/en-us/azure/ai-foundry/how-to/configure-private-link?tabs=azure-portal&pivots=fdp-project)
 - [Foundry RBAC](https://learn.microsoft.com/en-us/azure/ai-foundry/concepts/rbac-azure-ai-foundry?pivots=fdp-project)
 - [Azure RBAC](https://learn.microsoft.com/en-us/azure/role-based-access-control/)
